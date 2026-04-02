@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- 배경 말풍선 -->
+    <path
+        android:fillColor="#000000"
+        android:pathData="M2,4C2,2.9 2.9,2 4,2H20C21.1,2 22,2.9 22,4V14C22,15.1 21.1,16 20,16H17L21,20V16H4C2.9,16 2,15.1 2,14V4Z" />
+    <!-- 흰색 재생 아이콘 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M10,6L16,9L10,12V6Z" />
+</vector>

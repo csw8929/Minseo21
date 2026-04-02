@@ -1,0 +1,953 @@
+package com.example.minseo2;
+
+import android.app.AlertDialog;
+import android.content.ContentResolver;
+import android.content.pm.ActivityInfo;
+import android.content.res.Configuration;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.ParcelFileDescriptor;
+import android.provider.MediaStore;
+import android.util.Log;
+import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
+import android.view.View;
+import android.view.WindowManager;
+import android.widget.FrameLayout;
+import android.widget.ImageButton;
+import android.widget.ProgressBar;
+import android.widget.SeekBar;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.activity.OnBackPressedCallback;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
+
+import org.videolan.libvlc.LibVLC;
+import org.videolan.libvlc.Media;
+import org.videolan.libvlc.MediaPlayer;
+import org.videolan.libvlc.interfaces.IMedia;
+import org.videolan.libvlc.util.VLCVideoLayout;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+public class MainActivity extends AppCompatActivity {
+
+    private static final int CONTROLS_HIDE_DELAY_MS = 3000;
+    private static final String TAG = "SACH";
+    private static final long SAVE_INTERVAL_MS = 5_000;
+
+    private LibVLC libVLC;
+    private MediaPlayer mediaPlayer;
+    private ParcelFileDescriptor pfd;
+    private boolean tracksLogged = false;
+    private int videoW = 0, videoH = 0;
+
+    private boolean rotationLocked = false;
+
+    private String currentUriKey = null;
+    private String currentTitle = null;
+    private String currentBucketId = null; // 현재 폴더 ID
+    private static final String PREFS_NAME    = "player_prefs";
+    private static final String KEY_SCREEN_MODE = "screen_mode";
+    private static final String KEY_LAST_STATE = "last_app_state";
+
+    private long pendingSeekMs       = -1;
+    private int  pendingSubtitleId   = Integer.MIN_VALUE;
+    private int  pendingAudioId      = Integer.MIN_VALUE;
+    private int  subtitleMargin      = 0;
+    private int  currentSubtitleTrackId  = Integer.MIN_VALUE;
+    private int  currentAudioTrackId     = Integer.MIN_VALUE;
+    private int  currentScreenMode       = -1;
+    private final ExecutorService dbExecutor = Executors.newSingleThreadExecutor();
+
+    private VLCVideoLayout videoLayout;
+    private ProgressBar loadingBar;
+    private View topBar;
+    private View centerControls;
+    private View controlsOverlay;
+    private TextView tvTitle;
+    private ImageButton btnOptions;
+    private ImageButton btnRotationLock;
+    private ImageButton btnPlayPause;
+    private ImageButton btnRewind;
+    private ImageButton btnFastForward;
+    private ImageButton btnPrev;
+    private ImageButton btnNext;
+    private SeekBar seekBar;
+    private TextView tvCurrentTime;
+    private TextView tvTotalTime;
+    private TextView errorText;
+
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private boolean isSeeking = false;
+    private boolean controlsVisible = false;
+
+    private ScaleGestureDetector scaleGestureDetector;
+    private float zoomFactor = 1.0f;
+
+    private final Runnable hideControls = () -> {
+        topBar.setVisibility(View.GONE);
+        centerControls.setVisibility(View.GONE);
+        controlsOverlay.setVisibility(View.GONE);
+        controlsVisible = false;
+    };
+
+    private final Runnable savePositionTask = new Runnable() {
+        @Override
+        public void run() {
+            saveCurrentPosition();
+            handler.postDelayed(this, SAVE_INTERVAL_MS);
+        }
+    };
+
+    private final Runnable updateProgress = new Runnable() {
+        @Override
+        public void run() {
+            if (mediaPlayer != null && !isSeeking) {
+                long time   = mediaPlayer.getTime();
+                long length = mediaPlayer.getLength();
+                if (length > 0) {
+                    seekBar.setMax((int) length);
+                    seekBar.setProgress((int) time);
+                    tvCurrentTime.setText(formatTime(time));
+                    tvTotalTime.setText(formatTime(length));
+                }
+            }
+            handler.postDelayed(this, 500);
+        }
+    };
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        WindowInsetsControllerCompat insetsCtrl =
+                new WindowInsetsControllerCompat(getWindow(), getWindow().getDecorView());
+        insetsCtrl.hide(WindowInsetsCompat.Type.systemBars());
+        insetsCtrl.setSystemBarsBehavior(
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+
+        setContentView(R.layout.activity_main);
+
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putInt(KEY_LAST_STATE, 1).apply();
+
+        videoLayout      = findViewById(R.id.videoLayout);
+        loadingBar       = findViewById(R.id.loadingBar);
+        topBar           = findViewById(R.id.topBar);
+        centerControls   = findViewById(R.id.centerControls);
+        controlsOverlay  = findViewById(R.id.controlsOverlay);
+        tvTitle          = findViewById(R.id.tvTitle);
+        btnOptions       = findViewById(R.id.btnOptions);
+        btnRotationLock  = findViewById(R.id.btnRotationLock);
+        btnPlayPause     = findViewById(R.id.btnPlayPause);
+        btnRewind        = findViewById(R.id.btnRewind);
+        btnFastForward   = findViewById(R.id.btnFastForward);
+        btnPrev          = findViewById(R.id.btnPrev);
+        btnNext          = findViewById(R.id.btnNext);
+        seekBar          = findViewById(R.id.seekBar);
+        tvCurrentTime    = findViewById(R.id.tvCurrentTime);
+        tvTotalTime      = findViewById(R.id.tvTotalTime);
+        errorText        = findViewById(R.id.errorText);
+
+        scaleGestureDetector = new ScaleGestureDetector(this, new ScaleListener());
+
+        Uri videoUri = getIntent().getData();
+        if (videoUri == null) {
+            loadingBar.setVisibility(View.GONE);
+            errorText.setVisibility(View.VISIBLE);
+            errorText.setText("재생할 동영상이 없습니다.");
+            return;
+        }
+
+        currentTitle = getIntent().getStringExtra("title");
+        // bucketId 정보 가져오기
+        if (PlaylistHolder.playlist != null && PlaylistHolder.currentIndex >= 0) {
+            VideoItem current = PlaylistHolder.playlist.get(PlaylistHolder.currentIndex);
+            if (currentTitle == null) currentTitle = current.name;
+            currentBucketId = current.bucketId;
+        }
+
+        if (currentTitle == null) {
+            String seg = videoUri.getLastPathSegment();
+            currentTitle = seg != null ? seg : "";
+        }
+        tvTitle.setText(currentTitle);
+
+        updateNavButtons();
+        setupControls();
+        initPlayer(videoLayout, videoUri);
+        scheduleHide();
+        handler.post(updateProgress);
+
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putInt(KEY_LAST_STATE, 0).apply();
+                finish();
+            }
+        });
+    }
+
+    private class ScaleListener extends ScaleGestureDetector.SimpleOnScaleGestureListener {
+        @Override
+        public boolean onScale(ScaleGestureDetector detector) {
+            zoomFactor *= detector.getScaleFactor();
+            zoomFactor = Math.max(0.5f, Math.min(zoomFactor, 3.0f));
+            if (videoLayout != null) {
+                videoLayout.setScaleX(zoomFactor);
+                videoLayout.setScaleY(zoomFactor);
+            }
+            return true;
+        }
+    }
+
+    private void initPlayer(VLCVideoLayout videoLayout, Uri videoUri) {
+        currentUriKey = videoUri.toString();
+
+        ArrayList<String> options = new ArrayList<>();
+        options.add("--codec=mediacodec_ndk,mediacodec_jni,none");
+        options.add("--android-display-chroma=RV16");
+        options.add("--deinterlace=0");
+        options.add("--aout=opensles");
+        options.add("--network-caching=5000");
+        options.add("--file-caching=1000");
+        options.add("--live-caching=300");
+        options.add("--clock-jitter=0");
+        options.add("--clock-synchro=0");
+        options.add("--avcodec-fast");
+        options.add("--no-drop-late-frames");
+        options.add("--no-skip-frames");
+        options.add("--no-audio-time-stretch");
+        options.add("--input-fast-seek");
+        if (subtitleMargin > 0) {
+            options.add("--sub-margin=" + subtitleMargin);
+        }
+
+        libVLC = new LibVLC(this, options);
+        mediaPlayer = new MediaPlayer(libVLC);
+        mediaPlayer.attachViews(videoLayout, null, false, true);
+        mediaPlayer.setEventListener(event -> runOnUiThread(() -> handleVlcEvent(event)));
+
+        loadSavedPosition(currentUriKey);
+
+        Media media = openMedia(videoUri);
+        if (media == null) {
+            loadingBar.setVisibility(View.GONE);
+            errorText.setVisibility(View.VISIBLE);
+            errorText.setText("파일을 열 수 없습니다.");
+            return;
+        }
+        
+        tryAddExternalSubtitles(videoUri);
+
+        mediaPlayer.setMedia(media);
+        media.release();
+        mediaPlayer.play();
+    }
+
+    private void tryAddExternalSubtitles(Uri videoUri) {
+        if (!"content".equals(videoUri.getScheme())) return;
+
+        String videoPath = null;
+        String videoName = null;
+        String[] proj = {MediaStore.Video.Media.DATA, MediaStore.Video.Media.DISPLAY_NAME};
+        try (Cursor cursor = getContentResolver().query(videoUri, proj, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                videoPath = cursor.getString(0);
+                videoName = cursor.getString(1);
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "failed to get video path", e);
+        }
+
+        if (videoPath == null || videoName == null) return;
+
+        int lastDot = videoName.lastIndexOf('.');
+        String baseName = (lastDot > 0) ? videoName.substring(0, lastDot) : videoName;
+        String folderPath = videoPath.substring(0, videoPath.lastIndexOf('/') + 1);
+
+        String[] subExts = {".smi", ".srt", ".SMI", ".SRT", ".ass", ".ssa"};
+        boolean found = false;
+        for (String ext : subExts) {
+            java.io.File subFile = new java.io.File(folderPath + baseName + ext);
+            if (subFile.exists()) {
+                Log.d(TAG, "[Sub] Found external subtitle: " + subFile.getAbsolutePath());
+                boolean success = mediaPlayer.addSlave(IMedia.Slave.Type.Subtitle, Uri.fromFile(subFile), true);
+                if (success) {
+                    Log.i(TAG, "[Sub] Successfully added and selected: " + subFile.getName());
+                    found = true;
+                } else {
+                    Log.e(TAG, "[Sub] Failed to add subtitle: " + subFile.getName());
+                }
+            }
+        }
+        if (!found) Log.d(TAG, "[Sub] No matching external subtitles found.");
+    }
+
+    private void loadSavedPosition(String uriKey) {
+        dbExecutor.execute(() -> {
+            PlaybackPosition pos = PlaybackDatabase.getInstance(this)
+                    .playbackDao().getPosition(uriKey);
+            runOnUiThread(() -> {
+                if (pos == null) return;
+                if (pos.positionMs > 0) {
+                    Log.d(TAG, "[DB] resume at " + pos.positionMs + "ms");
+                    if (tracksLogged && mediaPlayer != null) {
+                        mediaPlayer.setTime(pos.positionMs);
+                    } else {
+                        pendingSeekMs = pos.positionMs;
+                    }
+                }
+                pendingSubtitleId = pos.subtitleTrackId;
+                pendingAudioId   = pos.audioTrackId;
+                if (tracksLogged) applyPendingSettings();
+            });
+        });
+    }
+
+    private void saveCurrentPosition() {
+        if (mediaPlayer == null || currentUriKey == null) return;
+        long pos = mediaPlayer.getTime();
+        if (pos <= 0) return;
+        PlaybackPosition pp = new PlaybackPosition();
+        pp.uri = currentUriKey;
+        pp.name = currentTitle;
+        pp.bucketId = currentBucketId; // 버킷 ID 저장
+        pp.positionMs = pos;
+        pp.updatedAt = System.currentTimeMillis();
+        pp.subtitleTrackId = currentSubtitleTrackId;
+        pp.audioTrackId    = currentAudioTrackId;
+        pp.screenMode      = -1;
+        dbExecutor.execute(() ->
+                PlaybackDatabase.getInstance(this).playbackDao().savePosition(pp));
+    }
+
+    private void logTracks() {
+        try {
+            IMedia m = mediaPlayer.getMedia();
+            if (m != null) {
+                for (int i = 0; i < m.getTrackCount(); i++) {
+                    IMedia.Track t = m.getTrack(i);
+                    if (t.type == IMedia.Track.Type.Video) {
+                        IMedia.VideoTrack vt = (IMedia.VideoTrack) t;
+                        videoW = vt.width;
+                        videoH = vt.height;
+                        Log.i(TAG, "[VLC] Video Track: " + videoW + "x" + videoH);
+                        Log.i(TAG, "[VLC] HW ACCEL: MediaCodec (qti/google) requested.");
+                        break;
+                    }
+                }
+                m.release();
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "video track info failed", e);
+        }
+
+        MediaPlayer.TrackDescription[] spuTracks = mediaPlayer.getSpuTracks();
+        if (spuTracks != null) {
+            Log.i(TAG, "[VLC] ALL Subtitle tracks list:");
+            for (MediaPlayer.TrackDescription td : spuTracks) {
+                Log.i(TAG, "  - [SUB] ID: " + td.id + ", Name: " + td.name);
+            }
+        }
+
+        MediaPlayer.TrackDescription[] audioTracks = mediaPlayer.getAudioTracks();
+        if (audioTracks != null) {
+            Log.i(TAG, "[VLC] ALL Audio tracks list:");
+            for (MediaPlayer.TrackDescription td : audioTracks) {
+                Log.i(TAG, "  - [AUDIO] ID: " + td.id + ", Name: " + td.name);
+            }
+        }
+    }
+
+    private Media openMedia(Uri uri) {
+        String scheme = uri.getScheme();
+        Media media;
+        if ("content".equals(scheme)) {
+            try {
+                pfd = getContentResolver().openFileDescriptor(uri, "r");
+                if (pfd == null) throw new Exception("openFileDescriptor returned null");
+                media = new Media(libVLC, pfd.getFileDescriptor());
+            } catch (Exception e) {
+                Log.e(TAG, "content:// open failed", e);
+                return null;
+            }
+        } else {
+            media = new Media(libVLC, uri);
+            if ("http".equals(scheme) || "https".equals(scheme)) {
+                media.addOption(":network-caching=5000");
+            }
+        }
+        return media;
+    }
+
+    private void handleVlcEvent(MediaPlayer.Event event) {
+        switch (event.type) {
+            case MediaPlayer.Event.Opening:
+                loadingBar.setVisibility(View.VISIBLE);
+                break;
+            case MediaPlayer.Event.Buffering:
+                loadingBar.setVisibility(event.getBuffering() < 100f ? View.VISIBLE : View.GONE);
+                break;
+            case MediaPlayer.Event.Playing:
+                loadingBar.setVisibility(View.GONE);
+                btnPlayPause.setImageResource(android.R.drawable.ic_media_pause);
+                if (!tracksLogged) {
+                    tracksLogged = true;
+                    logTracks();
+                    applyPendingSettings();
+                    applyDefaultTracksIfNeeded();
+                    
+                    currentSubtitleTrackId = mediaPlayer.getSpuTrack();
+                    currentAudioTrackId = mediaPlayer.getAudioTrack();
+                    Log.d(TAG, "[VLC] Initial active tracks: Sub=" + currentSubtitleTrackId + " Audio=" + currentAudioTrackId);
+                }
+                if (pendingSeekMs > 0) {
+                    mediaPlayer.setTime(pendingSeekMs);
+                    pendingSeekMs = -1;
+                }
+                handler.removeCallbacks(savePositionTask);
+                handler.postDelayed(savePositionTask, SAVE_INTERVAL_MS);
+                break;
+            case MediaPlayer.Event.Paused:
+            case MediaPlayer.Event.Stopped:
+                btnPlayPause.setImageResource(android.R.drawable.ic_media_play);
+                handler.removeCallbacks(savePositionTask);
+                saveCurrentPosition();
+                showControls();
+                break;
+            case MediaPlayer.Event.EndReached:
+                btnPlayPause.setImageResource(android.R.drawable.ic_media_play);
+                handler.removeCallbacks(savePositionTask);
+                if (currentUriKey != null) {
+                    final String key = currentUriKey;
+                    dbExecutor.execute(() ->
+                            PlaybackDatabase.getInstance(this).playbackDao().clearPosition(key));
+                }
+                showControls();
+                if (PlaylistHolder.playlist != null) {
+                    int next = PlaylistHolder.currentIndex + 1;
+                    if (next < PlaylistHolder.playlist.size()) {
+                        handler.postDelayed(() -> playEpisode(next), 1000);
+                    }
+                }
+                break;
+            case MediaPlayer.Event.Vout:
+                handler.postDelayed(() -> {
+                    int mode = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getInt(KEY_SCREEN_MODE, 0);
+                    applyScreenMode(mode);
+                    currentScreenMode = mode;
+                }, 300);
+                break;
+            case MediaPlayer.Event.EncounteredError:
+                loadingBar.setVisibility(View.GONE);
+                errorText.setVisibility(View.VISIBLE);
+                errorText.setText("동영상을 재생할 수 없습니다.");
+                break;
+        }
+    }
+
+    private void playEpisode(int newIndex) {
+        if (PlaylistHolder.playlist == null) return;
+        if (newIndex < 0 || newIndex >= PlaylistHolder.playlist.size()) return;
+
+        saveCurrentPosition();
+        resetZoom();
+
+        PlaylistHolder.currentIndex = newIndex;
+        VideoItem item = PlaylistHolder.playlist.get(newIndex);
+
+        currentTitle = item.name;
+        currentBucketId = item.bucketId; // 버킷 ID 갱신
+        tvTitle.setText(currentTitle);
+        tracksLogged = false;
+        videoW = 0;
+        videoH = 0;
+        pendingSeekMs          = -1;
+        pendingSubtitleId      = Integer.MIN_VALUE;
+        pendingAudioId         = Integer.MIN_VALUE;
+        currentSubtitleTrackId = Integer.MIN_VALUE;
+        currentAudioTrackId    = Integer.MIN_VALUE;
+        currentScreenMode      = -1;
+        mediaPlayer.setAspectRatio(null);
+        mediaPlayer.setScale(0f);
+        updateNavButtons();
+
+        if (pfd != null) {
+            try { pfd.close(); } catch (Exception ignored) {}
+            pfd = null;
+        }
+
+        currentUriKey = item.uri.toString();
+        loadSavedPosition(currentUriKey);
+
+        Media media = openMedia(item.uri);
+        if (media != null) {
+            tryAddExternalSubtitles(item.uri);
+            mediaPlayer.setMedia(media);
+            media.release();
+            mediaPlayer.play();
+        }
+    }
+
+    private void updateNavButtons() {
+        if (PlaylistHolder.playlist == null || PlaylistHolder.playlist.size() <= 1) {
+            btnPrev.setVisibility(View.GONE);
+            btnNext.setVisibility(View.GONE);
+            return;
+        }
+        btnPrev.setVisibility(PlaylistHolder.currentIndex > 0 ? View.VISIBLE : View.INVISIBLE);
+        btnNext.setVisibility(
+                PlaylistHolder.currentIndex < PlaylistHolder.playlist.size() - 1
+                        ? View.VISIBLE : View.INVISIBLE);
+    }
+
+    private void setupControls() {
+        FrameLayout root = findViewById(R.id.root);
+        root.setOnTouchListener((v, event) -> {
+            scaleGestureDetector.onTouchEvent(event);
+            return false;
+        });
+        
+        root.setOnClickListener(v -> toggleControls());
+        topBar.setOnClickListener(v -> resetHideTimer());
+        centerControls.setOnClickListener(v -> resetHideTimer());
+        controlsOverlay.setOnClickListener(v -> resetHideTimer());
+
+        btnPlayPause.setOnClickListener(v -> {
+            if (mediaPlayer == null) return;
+            if (mediaPlayer.isPlaying()) mediaPlayer.pause();
+            else mediaPlayer.play();
+            resetHideTimer();
+        });
+
+        btnRewind.setOnClickListener(v -> {
+            if (mediaPlayer != null) {
+                long t = Math.max(0, mediaPlayer.getTime() - 10_000);
+                mediaPlayer.setTime(t);
+            }
+            resetHideTimer();
+        });
+
+        btnFastForward.setOnClickListener(v -> {
+            if (mediaPlayer != null) {
+                long length = mediaPlayer.getLength();
+                long t = mediaPlayer.getTime() + 10_000;
+                if (length > 0) t = Math.min(t, length);
+                mediaPlayer.setTime(t);
+            }
+            resetHideTimer();
+        });
+
+        btnPrev.setOnClickListener(v -> {
+            playEpisode(PlaylistHolder.currentIndex - 1);
+            resetHideTimer();
+        });
+
+        btnNext.setOnClickListener(v -> {
+            playEpisode(PlaylistHolder.currentIndex + 1);
+            resetHideTimer();
+        });
+
+        btnRotationLock.setOnClickListener(v -> {
+            rotationLocked = !rotationLocked;
+            if (rotationLocked) {
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LOCKED);
+                btnRotationLock.setBackgroundResource(R.drawable.bg_blue_circle_locked);
+            } else {
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR);
+                btnRotationLock.setBackgroundResource(R.drawable.bg_blue_circle);
+            }
+            resetHideTimer();
+        });
+
+        btnOptions.setOnClickListener(v -> {
+            handler.removeCallbacks(hideControls);
+            showOptionsMenu();
+        });
+
+        seekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                if (fromUser) tvCurrentTime.setText(formatTime(progress));
+            }
+            @Override
+            public void onStartTrackingTouch(SeekBar bar) {
+                isSeeking = true;
+                handler.removeCallbacks(hideControls);
+            }
+            @Override
+            public void onStopTrackingTouch(SeekBar bar) {
+                isSeeking = false;
+                if (mediaPlayer != null) mediaPlayer.setTime(bar.getProgress());
+                resetHideTimer();
+            }
+        });
+    }
+
+    private void resetZoom() {
+        zoomFactor = 1.0f;
+        if (videoLayout != null) {
+            videoLayout.setScaleX(1.0f);
+            videoLayout.setScaleY(1.0f);
+        }
+    }
+
+    private void toggleControls() {
+        if (controlsVisible) {
+            topBar.setVisibility(View.GONE);
+            centerControls.setVisibility(View.GONE);
+            controlsOverlay.setVisibility(View.GONE);
+            controlsVisible = false;
+        } else {
+            showControls();
+        }
+    }
+
+    private void showControls() {
+        topBar.setVisibility(View.VISIBLE);
+        centerControls.setVisibility(View.VISIBLE);
+        controlsOverlay.setVisibility(View.VISIBLE);
+        controlsVisible = true;
+        resetHideTimer();
+    }
+
+    private void scheduleHide() {
+        handler.postDelayed(hideControls, CONTROLS_HIDE_DELAY_MS);
+    }
+
+    private void resetHideTimer() {
+        handler.removeCallbacks(hideControls);
+        handler.postDelayed(hideControls, CONTROLS_HIDE_DELAY_MS);
+    }
+
+    private void showOptionsMenu() {
+        if (mediaPlayer != null && mediaPlayer.isPlaying()) mediaPlayer.pause();
+        String[] items = {"자막 선택", "오디오 선택", "화면 모드 설정", "초기화"};
+        final boolean[] subDialogShown = {false};
+        new AlertDialog.Builder(this)
+                .setTitle("옵션")
+                .setItems(items, (dialog, which) -> {
+                    subDialogShown[0] = true;
+                    switch (which) {
+                        case 0: showSubtitleDialog();   break;
+                        case 1: showAudioDialog();      break;
+                        case 2: showScreenModeDialog(); break;
+                        case 3: clearDatabase();        break;
+                    }
+                })
+                .setOnDismissListener(d -> {
+                    if (!subDialogShown[0]) resumePlay();
+                })
+                .show();
+    }
+
+    private void resumePlay() {
+        if (mediaPlayer != null) mediaPlayer.play();
+        showControls();
+    }
+
+    private void clearDatabase() {
+        dbExecutor.execute(() -> {
+            PlaybackDatabase.getInstance(this).playbackDao().clearAll();
+            runOnUiThread(() ->
+                    Toast.makeText(this, "초기화 완료", Toast.LENGTH_SHORT).show());
+        });
+        resumePlay();
+    }
+
+    private void applyPendingSettings() {
+        if (mediaPlayer == null) return;
+        if (pendingSubtitleId != Integer.MIN_VALUE) {
+            mediaPlayer.setSpuTrack(pendingSubtitleId);
+            currentSubtitleTrackId = pendingSubtitleId;
+            pendingSubtitleId = Integer.MIN_VALUE;
+            Log.d(TAG, "[DB] restore subtitle id=" + currentSubtitleTrackId);
+        }
+        if (pendingAudioId != Integer.MIN_VALUE) {
+            mediaPlayer.setAudioTrack(pendingAudioId);
+            currentAudioTrackId = pendingAudioId;
+            pendingAudioId = Integer.MIN_VALUE;
+            Log.d(TAG, "[DB] restore audio id=" + currentAudioTrackId);
+        }
+        int savedMode = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getInt(KEY_SCREEN_MODE, 0);
+        applyScreenMode(savedMode);
+        currentScreenMode = savedMode;
+    }
+
+    private void showSubtitleDialog() {
+        if (mediaPlayer == null) return;
+        MediaPlayer.TrackDescription[] all = mediaPlayer.getSpuTracks();
+        if (all == null || all.length == 0) {
+            Toast.makeText(this, "자막 트랙이 없습니다.", Toast.LENGTH_SHORT).show();
+            resumePlay();
+            return;
+        }
+
+        List<MediaPlayer.TrackDescription> filtered = filterKorean(all);
+        final MediaPlayer.TrackDescription[] displayList = filtered.isEmpty() ? all : filtered.toArray(new MediaPlayer.TrackDescription[0]);
+
+        String[] names = new String[displayList.length];
+        int currentSubIdx = -1;
+        int activeId = mediaPlayer.getSpuTrack();
+
+        for (int i = 0; i < displayList.length; i++) {
+            names[i] = (displayList[i].name != null) ? displayList[i].name : "자막 트랙 " + displayList[i].id;
+            if (displayList[i].id == activeId) currentSubIdx = i;
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("자막 선택")
+                .setSingleChoiceItems(names, currentSubIdx, (dlg, which) -> {
+                    int selectedId = displayList[which].id;
+                    mediaPlayer.setSpuTrack(selectedId);
+                    currentSubtitleTrackId = selectedId;
+                    Log.i(TAG, "[SPU] User selected track: " + names[which] + " (id=" + selectedId + ")");
+                    saveCurrentPosition();
+                    dlg.dismiss();
+                })
+                .setOnDismissListener(d -> resumePlay())
+                .show();
+    }
+
+    private void showAudioDialog() {
+        if (mediaPlayer == null) return;
+        MediaPlayer.TrackDescription[] all = mediaPlayer.getAudioTracks();
+        if (all == null || all.length == 0) {
+            Toast.makeText(this, "오디오 트랙이 없습니다.", Toast.LENGTH_SHORT).show();
+            resumePlay();
+            return;
+        }
+
+        List<MediaPlayer.TrackDescription> filtered = filterKorean(all);
+        final MediaPlayer.TrackDescription[] displayList = filtered.isEmpty() ? all : filtered.toArray(new MediaPlayer.TrackDescription[0]);
+
+        String[] names = new String[displayList.length];
+        int currentAudioIdx = -1;
+        int activeId = mediaPlayer.getAudioTrack();
+
+        for (int i = 0; i < displayList.length; i++) {
+            names[i] = (displayList[i].name != null) ? displayList[i].name : "오디오 트랙 " + displayList[i].id;
+            if (displayList[i].id == activeId) currentAudioIdx = i;
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("오디오 선택")
+                .setSingleChoiceItems(names, currentAudioIdx, (dlg, which) -> {
+                    int selectedId = displayList[which].id;
+                    mediaPlayer.setAudioTrack(selectedId);
+                    currentAudioTrackId = selectedId;
+                    Log.i(TAG, "[Audio] User selected track: " + names[which] + " (id=" + selectedId + ")");
+                    saveCurrentPosition();
+                    dlg.dismiss();
+                })
+                .setOnDismissListener(d -> resumePlay())
+                .show();
+    }
+
+    private void showScreenModeDialog() {
+        String[] modes = {"기본", "가로", "세로"};
+        int savedMode = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getInt(KEY_SCREEN_MODE, 0);
+
+        new AlertDialog.Builder(this)
+                .setTitle("화면 모드 설정")
+                .setSingleChoiceItems(modes, savedMode, (dialog, which) -> {
+                    int prevMode = currentScreenMode;
+                    applyScreenMode(which);
+                    currentScreenMode = which;
+                    getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                            .putInt(KEY_SCREEN_MODE, which).apply();
+                    dialog.dismiss();
+                    // 자막 마진이 달라지는 경우(가로↔다른 모드 전환) 미디어 재로드
+                    if (prevMode != which && (which == 1 || prevMode == 1)) {
+                        reloadCurrentMediaWithSubtitleMargin();
+                    } else {
+                        resumePlay();
+                    }
+                })
+                .setOnDismissListener(d -> {
+                    // 아무것도 선택 안 하고 닫은 경우에만 resumePlay
+                    if (mediaPlayer != null && !mediaPlayer.isPlaying()) resumePlay();
+                })
+                .show();
+    }
+
+    private void applyScreenMode(int mode) {
+        if (mediaPlayer == null) return;
+        android.graphics.Point sz = new android.graphics.Point();
+        getWindowManager().getDefaultDisplay().getSize(sz);
+        int sw = sz.x, sh = sz.y;
+
+        resetZoom();
+
+        switch (mode) {
+            case 0:
+                mediaPlayer.setAspectRatio(null);
+                mediaPlayer.setScale(0f);
+                subtitleMargin = 0;
+                break;
+            case 1:
+                mediaPlayer.setAspectRatio(null);
+                if (videoW > 0) {
+                    float scale = (float) sw / videoW;
+                    mediaPlayer.setScale(scale);
+                    // 가로 맞춤 시 세로가 화면 밖으로 넘치는 만큼 자막을 위로 올림
+                    // overflow/2: 화면 경계까지, + 폰트 높이 추정값(표시 높이의 6%): 글자가 완전히 보이도록
+                    float displayH = videoH * scale;
+                    subtitleMargin = displayH > sh
+                            ? (int) ((displayH - sh) / 2) + (int) (displayH * 0.06f)
+                            : 0;
+                } else {
+                    mediaPlayer.setAspectRatio(sw + ":" + sh);
+                    mediaPlayer.setScale(0f);
+                    subtitleMargin = 0;
+                }
+                break;
+            case 2:
+                mediaPlayer.setAspectRatio(null);
+                if (videoH > 0) {
+                    mediaPlayer.setScale((float) sh / videoH);
+                } else {
+                    mediaPlayer.setScale(0f);
+                }
+                subtitleMargin = 0;
+                break;
+        }
+    }
+
+    private void reloadCurrentMediaWithSubtitleMargin() {
+        if (currentUriKey == null) return;
+
+        // 현재 위치와 트랙 정보를 DB에 저장 (loadSavedPosition이 이후 복원)
+        saveCurrentPosition();
+
+        // 상태 초기화
+        tracksLogged           = false;
+        currentSubtitleTrackId = Integer.MIN_VALUE;
+        currentAudioTrackId    = Integer.MIN_VALUE;
+        pendingSeekMs          = -1;
+        pendingSubtitleId      = Integer.MIN_VALUE;
+        pendingAudioId         = Integer.MIN_VALUE;
+
+        // libVLC 재초기화 필요 (--sub-margin은 init 옵션이므로)
+        if (mediaPlayer != null) {
+            mediaPlayer.setEventListener(null);
+            mediaPlayer.detachViews();
+            mediaPlayer.release();
+            mediaPlayer = null;
+        }
+        if (libVLC != null) {
+            libVLC.release();
+            libVLC = null;
+        }
+        if (pfd != null) {
+            try { pfd.close(); } catch (Exception ignored) {}
+            pfd = null;
+        }
+
+        // dbExecutor는 단일 스레드이므로 saveCurrentPosition의 DB 쓰기 완료 후
+        // initPlayer 내부의 loadSavedPosition이 올바른 위치/트랙을 읽어옴
+        initPlayer(videoLayout, Uri.parse(currentUriKey));
+    }
+
+    private MediaPlayer.TrackDescription findDefaultTrack(MediaPlayer.TrackDescription[] all) {
+        List<MediaPlayer.TrackDescription> pool = filterKorean(all);
+        if (pool.isEmpty()) return null;
+        for (MediaPlayer.TrackDescription t : pool) {
+            if (t.name != null && t.name.toLowerCase().contains("track")) {
+                return t;
+            }
+        }
+        return pool.get(0);
+    }
+
+    private void applyDefaultTracksIfNeeded() {
+        if (mediaPlayer == null) return;
+        if (currentSubtitleTrackId == Integer.MIN_VALUE) {
+            MediaPlayer.TrackDescription[] spuTracks = mediaPlayer.getSpuTracks();
+            if (spuTracks != null && spuTracks.length > 0) {
+                MediaPlayer.TrackDescription def = findDefaultTrack(spuTracks);
+                if (def != null) {
+                    mediaPlayer.setSpuTrack(def.id);
+                    currentSubtitleTrackId = def.id;
+                }
+            }
+        }
+        if (currentAudioTrackId == Integer.MIN_VALUE) {
+            MediaPlayer.TrackDescription[] audioTracks = mediaPlayer.getAudioTracks();
+            if (audioTracks != null && audioTracks.length > 0) {
+                MediaPlayer.TrackDescription def = findDefaultTrack(audioTracks);
+                if (def != null) {
+                    mediaPlayer.setAudioTrack(def.id);
+                    currentAudioTrackId = def.id;
+                }
+            }
+        }
+    }
+
+    private List<MediaPlayer.TrackDescription> filterKorean(MediaPlayer.TrackDescription[] tracks) {
+        List<MediaPlayer.TrackDescription> result = new ArrayList<>();
+        for (MediaPlayer.TrackDescription t : tracks) {
+            if (t.name == null) continue;
+            String lower = t.name.toLowerCase();
+            if (lower.contains("korea") || t.name.contains("한국")) {
+                result.add(t);
+            }
+        }
+        return result;
+    }
+
+    private String formatTime(long ms) {
+        long s = ms / 1000;
+        long h = s / 3600;
+        long m = (s % 3600) / 60;
+        s = s % 60;
+        return h > 0 ? String.format("%d:%02d:%02d", h, m, s)
+                     : String.format("%d:%02d", m, s);
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        if (!rotationLocked) {
+            int mode = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getInt(KEY_SCREEN_MODE, 0);
+            applyScreenMode(mode);
+            currentScreenMode = mode;
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        saveCurrentPosition();
+        if (mediaPlayer != null) mediaPlayer.pause();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        handler.removeCallbacksAndMessages(null);
+        saveCurrentPosition();
+        if (mediaPlayer != null) {
+            mediaPlayer.detachViews();
+            mediaPlayer.release();
+        }
+        if (libVLC != null) libVLC.release();
+        if (pfd != null) {
+            try { pfd.close(); } catch (Exception ignored) {}
+        }
+        dbExecutor.shutdown();
+    }
+}
