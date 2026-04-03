@@ -33,6 +33,7 @@ import org.videolan.libvlc.LibVLC;
 import org.videolan.libvlc.Media;
 import org.videolan.libvlc.MediaPlayer;
 import org.videolan.libvlc.interfaces.IMedia;
+import org.videolan.libvlc.interfaces.IVLCVout;
 import org.videolan.libvlc.util.VLCVideoLayout;
 
 import java.util.ArrayList;
@@ -40,7 +41,7 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-public class MainActivity extends AppCompatActivity {
+public class MainActivity extends AppCompatActivity implements IVLCVout.Callback {
 
     private static final int CONTROLS_HIDE_DELAY_MS = 3000;
     private static final String TAG = "SACH";
@@ -238,6 +239,7 @@ public class MainActivity extends AppCompatActivity {
         libVLC = new LibVLC(this, options);
         mediaPlayer = new MediaPlayer(libVLC);
         mediaPlayer.attachViews(videoLayout, null, false, true);
+        mediaPlayer.getVLCVout().addCallback(this);
         mediaPlayer.setEventListener(event -> runOnUiThread(() -> handleVlcEvent(event)));
 
         loadSavedPosition(currentUriKey);
@@ -409,10 +411,15 @@ public class MainActivity extends AppCompatActivity {
                     logTracks();
                     applyPendingSettings();
                     applyDefaultTracksIfNeeded();
-                    
+
                     currentSubtitleTrackId = mediaPlayer.getSpuTrack();
                     currentAudioTrackId = mediaPlayer.getAudioTrack();
                     Log.d(TAG, "[VLC] Initial active tracks: Sub=" + currentSubtitleTrackId + " Audio=" + currentAudioTrackId);
+
+                    // VLC가 Playing 직후 onNewVideoLayout으로 scale을 리셋하므로, 그 이후에 재적용
+                    if (currentScreenMode > 0) {
+                        handler.postDelayed(() -> applyScreenMode(currentScreenMode), 200);
+                    }
                 }
                 if (pendingSeekMs > 0) {
                     mediaPlayer.setTime(pendingSeekMs);
@@ -445,11 +452,6 @@ public class MainActivity extends AppCompatActivity {
                 }
                 break;
             case MediaPlayer.Event.Vout:
-                handler.postDelayed(() -> {
-                    int mode = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getInt(KEY_SCREEN_MODE, 0);
-                    applyScreenMode(mode);
-                    currentScreenMode = mode;
-                }, 300);
                 break;
             case MediaPlayer.Event.EncounteredError:
                 loadingBar.setVisibility(View.GONE);
@@ -758,7 +760,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showScreenModeDialog() {
-        String[] modes = {"기본", "가로", "세로"};
+        String[] modes = {"기본", "가로채움", "세로채움"};
         int savedMode = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getInt(KEY_SCREEN_MODE, 0);
 
         new AlertDialog.Builder(this)
@@ -921,11 +923,24 @@ public class MainActivity extends AppCompatActivity {
     @Override
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
-        if (!rotationLocked) {
-            int mode = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getInt(KEY_SCREEN_MODE, 0);
-            applyScreenMode(mode);
-            currentScreenMode = mode;
+        if (currentScreenMode > 0) {
+            videoLayout.setAlpha(0f);
+            handler.postDelayed(() -> {
+                applyScreenMode(currentScreenMode);
+                videoLayout.setAlpha(1f);
+            }, 200);
         }
+    }
+
+    @Override
+    public void onSurfacesCreated(IVLCVout vlcVout) {
+        if (currentScreenMode >= 0 && videoW > 0) {
+            applyScreenMode(currentScreenMode);
+        }
+    }
+
+    @Override
+    public void onSurfacesDestroyed(IVLCVout vlcVout) {
     }
 
     @Override
@@ -941,6 +956,7 @@ public class MainActivity extends AppCompatActivity {
         handler.removeCallbacksAndMessages(null);
         saveCurrentPosition();
         if (mediaPlayer != null) {
+            mediaPlayer.getVLCVout().removeCallback(this);
             mediaPlayer.detachViews();
             mediaPlayer.release();
         }
