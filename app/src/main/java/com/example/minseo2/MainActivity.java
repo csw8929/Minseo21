@@ -101,6 +101,12 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         centerControls.setVisibility(View.GONE);
         controlsOverlay.setVisibility(View.GONE);
         controlsVisible = false;
+        // 컨트롤 숨김 시 화면잠금 자동 해제
+        if (rotationLocked) {
+            rotationLocked = false;
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR);
+            btnRotationLock.setBackgroundResource(R.drawable.bg_blue_circle);
+        }
     };
 
     private final Runnable savePositionTask = new Runnable() {
@@ -941,6 +947,15 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
 
     @Override
     public void onSurfacesDestroyed(IVLCVout vlcVout) {
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // 화면잠금 해제 후 돌아왔을 때 rotation lock 상태 재적용
+        if (rotationLocked) {
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LOCKED);
+        }
     }
 
     @Override

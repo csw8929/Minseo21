@@ -9,8 +9,11 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.RecyclerView;
 
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
+import java.util.Locale;
 
 public class FileItemAdapter extends RecyclerView.Adapter<FileItemAdapter.ViewHolder> {
 
@@ -20,6 +23,7 @@ public class FileItemAdapter extends RecyclerView.Adapter<FileItemAdapter.ViewHo
 
     private final List<VideoItem> items = new ArrayList<>();
     private final OnClickListener listener;
+    private final SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd  HH:mm", Locale.getDefault());
 
     public FileItemAdapter(OnClickListener listener) {
         this.listener = listener;
@@ -48,7 +52,8 @@ public class FileItemAdapter extends RecyclerView.Adapter<FileItemAdapter.ViewHo
             h.tvMeta.setText("");
         } else {
             h.ivIcon.setImageResource(R.drawable.ic_video);
-            h.tvMeta.setText(formatSize(item.size));
+            String meta = formatSize(item.size) + "  |  " + dateFormat.format(new Date(item.dateModified * 1000));
+            h.tvMeta.setText(meta);
         }
         h.itemView.setOnClickListener(v -> listener.onClick(item));
     }

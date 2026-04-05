@@ -191,6 +191,7 @@ public class FileListActivity extends AppCompatActivity {
                 MediaStore.Video.Media.DISPLAY_NAME,
                 MediaStore.Video.Media.SIZE,
                 MediaStore.Video.Media.BUCKET_ID,
+                MediaStore.Video.Media.DATE_MODIFIED,
         };
         String sel    = MediaStore.Video.Media.BUCKET_ID + " = ?";
         String[] args = {bucketId};
@@ -203,13 +204,15 @@ public class FileListActivity extends AppCompatActivity {
                 int colId   = c.getColumnIndexOrThrow(MediaStore.Video.Media._ID);
                 int colName = c.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME);
                 int colSize = c.getColumnIndexOrThrow(MediaStore.Video.Media.SIZE);
+                int colDate = c.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_MODIFIED);
                 while (c.moveToNext()) {
                     long id   = c.getLong(colId);
                     String nm = c.getString(colName);
                     long sz   = c.getLong(colSize);
+                    long date = c.getLong(colDate);
                     Uri uri   = ContentUris.withAppendedId(
                             MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id);
-                    items.add(VideoItem.video(nm, bucketId, uri, sz));
+                    items.add(VideoItem.video(nm, bucketId, uri, sz, date));
                 }
             }
         }
