@@ -238,19 +238,23 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         currentUriKey = videoUri.toString();
         currentDbKey  = resolveDbKey(videoUri);
 
+        boolean isNetwork = "http".equals(videoUri.getScheme()) || "https".equals(videoUri.getScheme());
+
         ArrayList<String> options = new ArrayList<>();
+        // HW 디코더: mediacodec_ndk(NDK) → mediacodec_jni(JNI) → 소프트웨어 순서로 시도
         options.add("--codec=mediacodec_ndk,mediacodec_jni,none");
-        options.add("--android-display-chroma=RV32"); // RV16→RV32: 16bit→32bit 컬러 (화질 개선)
-        options.add("--deinterlace=-1");              // 0(off)→-1(auto): 인터레이스 영상 자동 감지
+        // 색심도: RV32 (32bit, 고색 재현). RV16보다 메모리 대역폭 2× 사용.
+        // VLCVideoLayout은 TextureView 기반 → --vout=android-display 사용 불가 (충돌)
+        options.add("--android-display-chroma=RV32");
+        options.add("--deinterlace=0");               // 0(off): 인터레이스 감지 CPU 비용 제거. 필요 시 -1(auto)
         options.add("--aout=opensles");
-        options.add("--network-caching=5000");
-        options.add("--file-caching=1000");
+        // 캐싱: 로컬 500ms / NAS 3000ms — 과도한 버퍼는 초기 지연만 늘린다
+        options.add(isNetwork ? "--network-caching=3000" : "--file-caching=500");
         options.add("--live-caching=300");
         options.add("--clock-jitter=0");
         options.add("--clock-synchro=0");
-        options.add("--avcodec-fast");
-        options.add("--no-drop-late-frames");
-        options.add("--no-skip-frames");
+        // NOTE: --no-drop-late-frames / --no-skip-frames 제거.
+        // 위 두 옵션은 "프레임 절대 드롭 금지"로 지연 누적 시 회복 불가 → 끊김 주 원인
         options.add("--no-audio-time-stretch");
         options.add("--input-fast-seek");
         if (subtitleMargin > 0) {
