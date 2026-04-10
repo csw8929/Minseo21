@@ -1,4 +1,4 @@
-package com.example.minseo2;
+package com.example.minseo21;
 
 import android.Manifest;
 import android.app.AlertDialog;
@@ -18,6 +18,7 @@ import android.widget.Toast;
 import android.app.Activity;
 import android.widget.ImageButton;
 
+import androidx.annotation.NonNull;
 import androidx.activity.OnBackPressedCallback;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
@@ -88,9 +89,27 @@ public class FileListActivity extends AppCompatActivity {
             });
 
     @Override
+    protected void onSaveInstanceState(@NonNull Bundle outState) {
+        super.onSaveInstanceState(outState);
+        // NAS 경로 스택 저장: Activity가 백그라운드에서 소멸 후 복원될 때
+        // nasPathStack이 비면 Back 핸들러가 로컬 탭으로 이동하는 버그 방지
+        if (!nasPathStack.isEmpty()) {
+            outState.putStringArrayList("nasPathStack", new ArrayList<>(nasPathStack));
+        }
+    }
+
+    @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_file_list);
+
+        // NAS 경로 스택 복원 (onSaveInstanceState에서 저장됨)
+        if (savedInstanceState != null) {
+            ArrayList<String> savedStack = savedInstanceState.getStringArrayList("nasPathStack");
+            if (savedStack != null && !savedStack.isEmpty()) {
+                nasPathStack.addAll(savedStack);
+            }
+        }
 
         tvPath       = findViewById(R.id.tvPath);
         tvEmpty      = findViewById(R.id.tvEmpty);
@@ -337,29 +356,43 @@ public class FileListActivity extends AppCompatActivity {
         if (nasSid == null) {
             connectNas();
         } else if (!nasPathStack.isEmpty()) {
-            // 이미 탐색 중 — 현재 경로 그대로 표시
-            rvNas.setVisibility(View.VISIBLE);
-            nasLoadingView.setVisibility(View.GONE);
-            nasErrorView.setVisibility(View.GONE);
-            updateNasPath();
+            if (nasAdapter.getItemCount() == 0) {
+                // 스택은 복원됐지만 어댑터가 비어 있음 (Activity 재생성 후 SID 유효)
+                // → 현재 폴더 내용 재로드
+                loadNasFolder(nasPathStack.peek());
+            } else {
+                // 이미 탐색 중 — 현재 경로 그대로 표시
+                rvNas.setVisibility(View.VISIBLE);
+                nasLoadingView.setVisibility(View.GONE);
+                nasErrorView.setVisibility(View.GONE);
+                updateNasPath();
+            }
         } else {
             connectNas();
         }
     }
 
     private void connectNas() {
+        // 복원된 스택이 있으면 로그인 후 해당 폴더로 이동 (Activity 재생성 시 경로 복원)
+        final List<String> restoredStack = nasPathStack.isEmpty()
+                ? null : new ArrayList<>(nasPathStack);
         showNasLoading("NAS 연결 중…");
         DsFileApiClient.login(new DsFileApiClient.Callback<String>() {
             @Override public void onResult(String sid) {
                 if (isFinishing() || isDestroyed()) return;
                 nasSid = sid;
                 nasPathStack.clear();
-                String basePath = DsFileApiClient.getBasePath();
-                nasPathStack.push(basePath);
-                loadNasFolder(basePath);
+                if (restoredStack != null && !restoredStack.isEmpty()) {
+                    // 복원된 스택 그대로 사용 → 이전에 있던 폴더로 직접 이동
+                    nasPathStack.addAll(restoredStack);
+                } else {
+                    nasPathStack.push(DsFileApiClient.getBasePath());
+                }
+                loadNasFolder(nasPathStack.peek());
             }
             @Override public void onError(String msg) {
                 if (isFinishing() || isDestroyed()) return;
+                nasSid = null;
                 showNasError(msg);
             }
         });

@@ -19,6 +19,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Minseo2"
+rootProject.name = "Minseo21"
 include(":app")
  

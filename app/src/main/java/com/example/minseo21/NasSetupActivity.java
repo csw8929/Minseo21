@@ -1,4 +1,4 @@
-package com.example.minseo2;
+package com.example.minseo21;
 
 import android.content.Intent;
 import android.os.Bundle;

@@ -1,4 +1,4 @@
-package com.example.minseo2;
+package com.example.minseo21;
 
 import org.junit.Test;
 

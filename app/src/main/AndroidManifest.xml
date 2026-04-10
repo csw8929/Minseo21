@@ -16,7 +16,7 @@
         android:roundIcon="@drawable/icon_sach"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
-        android:theme="@style/Theme.Minseo2">
+        android:theme="@style/Theme.Minseo21">
         <!-- 파일 브라우저: 앱 실행 시 첫 화면 -->
         <activity
             android:name=".FileListActivity"

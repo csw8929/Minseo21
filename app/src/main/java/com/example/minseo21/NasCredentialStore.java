@@ -1,4 +1,4 @@
-package com.example.minseo2;
+package com.example.minseo21;
 
 import android.content.Context;
 import android.content.SharedPreferences;

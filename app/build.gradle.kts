@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace = "com.example.minseo2"
+    namespace = "com.example.minseo21"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.example.minseo2"
+        applicationId = "com.example.minseo21"
         minSdk = 24
         targetSdk = 36
         versionCode = 1
@@ -31,7 +31,7 @@ android {
         val variant = this
         variant.outputs.all {
             val output = this as com.android.build.gradle.internal.api.BaseVariantOutputImpl
-            output.outputFileName = "Minseo2.apk"
+            output.outputFileName = "Minseo21.apk"
         }
     }
 

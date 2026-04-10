@@ -1,4 +1,4 @@
-package com.example.minseo2;
+package com.example.minseo21;
 
 import android.app.AlertDialog;
 import android.content.ContentResolver;
@@ -254,16 +254,31 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         // 색심도: RV32 (32bit, 고색 재현). RV16보다 메모리 대역폭 2× 사용.
         // VLCVideoLayout은 TextureView 기반 → --vout=android-display 사용 불가 (충돌)
         options.add("--android-display-chroma=RV32");
-        options.add("--deinterlace=0");               // 0(off): 인터레이스 감지 CPU 비용 제거. 필요 시 -1(auto)
+        // -1(auto): 인터레이스 콘텐츠(구형 AVI 등) 자동 감지. 0(off)이면 인터레이스 AVI가 흐릿하게 보임
+        options.add("--deinterlace=-1");
         options.add("--aout=opensles");
-        // 캐싱: 로컬 500ms / NAS 3000ms — 과도한 버퍼는 초기 지연만 늘린다
-        options.add(isNetwork ? "--network-caching=3000" : "--file-caching=500");
+        // SW 디코더 스레드 수: Xvid/DivX 등 HW 가속 불가 코덱의 소프트웨어 폴백 성능 향상
+        options.add("--avcodec-threads=4");
+        // 캐싱: 로컬 500ms / NAS 5000ms — NAS 환경에서 AVI 스트리밍 안정성 확보
+        options.add(isNetwork ? "--network-caching=5000" : "--file-caching=500");
         options.add("--live-caching=300");
-        options.add("--clock-jitter=0");
-        options.add("--clock-synchro=0");
+        if (isNetwork) {
+            // NAS 스트리밍: 클럭 지터 허용 + 동기화 활성화
+            // AVI 컨테이너는 타이밍 메타데이터가 부정확해 jitter=0/synchro=0이면
+            // SurfaceTexture 버퍼 슬롯 고갈(BufferQueueProducer timeout) 발생
+            options.add("--clock-jitter=500");
+        } else {
+            options.add("--clock-jitter=0");
+            options.add("--clock-synchro=0");
+        }
         // NOTE: --no-drop-late-frames / --no-skip-frames 제거.
         // 위 두 옵션은 "프레임 절대 드롭 금지"로 지연 누적 시 회복 불가 → 끊김 주 원인
-        options.add("--no-audio-time-stretch");
+        // NOTE: --no-audio-time-stretch 제거 (네트워크용).
+        // AVI 오디오 헤더가 불량(0Hz)일 때 time-stretch 비활성화 시 오디오 초기화 실패 →
+        // A/V 동기 파이프라인 중단 → 프레임 스탈 유발
+        if (!isNetwork) {
+            options.add("--no-audio-time-stretch");
+        }
         options.add("--input-fast-seek");
         if (subtitleMargin > 0) {
             options.add("--sub-margin=" + subtitleMargin);
@@ -557,9 +572,6 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             }
         } else {
             media = new Media(libVLC, uri);
-            if ("http".equals(scheme) || "https".equals(scheme)) {
-                media.addOption(":network-caching=5000");
-            }
         }
         return media;
     }
