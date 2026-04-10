@@ -49,11 +49,13 @@ public class NasSetupActivity extends AppCompatActivity {
         etBasePath.setHint(DsFileConfig.BASE_PATH);
         etPosDir.setHint(DsFileConfig.POS_DIR);
 
-        // 편집 모드: 기존 값 채우기 (비밀번호 제외)
+        // 주소 필드: 항상 저장값(또는 DsFileConfig 기본값) 표시
+        etBaseUrl.setText(credStore.getBaseUrl());
+        etLanUrl.setText(credStore.getLanUrl());
+
+        // 편집 모드: 계정 정보도 채우기 (비밀번호 제외)
         boolean editMode = getIntent().getBooleanExtra(EXTRA_EDIT_MODE, false);
         if (editMode && credStore.hasCredentials()) {
-            etBaseUrl.setText(credStore.getBaseUrl());
-            etLanUrl.setText(credStore.getLanUrl());
             etUser.setText(credStore.getUser());
             // 비밀번호는 보안상 빈칸 — 변경하려면 다시 입력
             // 경로: 커스텀 값이 있으면 표시, 없으면 빈칸 (hint에 기본값 표시)
