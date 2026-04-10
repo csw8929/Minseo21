@@ -231,44 +231,66 @@ public class FileListActivity extends AppCompatActivity {
                     .playbackDao().getLastPosition();
             if (last == null || last.uri == null) return;
 
+            boolean isNas = DsFileApiClient.isNasUrl(last.uri);
             runOnUiThread(() -> {
-                // NAS 파일이면 SID 확인
-                boolean isNas = DsFileApiClient.isNasUrl(last.uri);
-                if (isNas && nasSid == null) {
-                    // NAS 연결 안 됨 → 이어보기 스킵
-                    return;
-                }
-
-                String playUri = last.uri;
                 if (isNas) {
-                    playUri = DsFileApiClient.canonicalToStream(last.uri, nasSid);
-                }
-                final String finalUri = playUri;
-
-                new AlertDialog.Builder(this)
-                        .setTitle("재생할까요?")
-                        .setMessage("마지막으로 재생하던 영상을 이어서 봅니다.\n\n"
-                                + (last.name != null ? last.name : "알 수 없는 파일"))
-                        .setPositiveButton("예", (dialog, which) -> {
-                            if (!isNas && last.bucketId != null) {
-                                List<VideoItem> videos = queryVideosInBucket(last.bucketId);
-                                if (!videos.isEmpty()) {
-                                    PlaylistHolder.playlist = videos;
-                                    int idx = -1;
-                                    for (int i = 0; i < videos.size(); i++) {
-                                        if (videos.get(i).uri.toString().equals(last.uri)) { idx = i; break; }
-                                    }
-                                    PlaylistHolder.currentIndex = idx >= 0 ? idx : 0;
-                                }
+                    // 인증 정보 없으면 스킵 (최초 설치 직후 등)
+                    if (!nasCredStore.hasCredentials()) return;
+                    if (nasSid != null) {
+                        // SID 이미 있음 (NAS 탭을 먼저 열었던 경우)
+                        showResumeDialog(last, DsFileApiClient.canonicalToStream(last.uri, nasSid));
+                    } else {
+                        // SID 없음 → 백그라운드 로그인 후 다이얼로그 표시
+                        DsFileApiClient.login(new DsFileApiClient.Callback<String>() {
+                            @Override public void onResult(String sid) {
+                                if (isFinishing() || isDestroyed()) return;
+                                nasSid = sid;
+                                showResumeDialog(last, DsFileApiClient.canonicalToStream(last.uri, sid));
                             }
-                            playVideo(Uri.parse(finalUri), last.name);
-                        })
-                        .setNegativeButton("아니오", (d, w) ->
-                                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-                                        .putInt(KEY_LAST_STATE, 0).apply())
-                        .show();
+                            @Override public void onError(String msg) {
+                                // 로그인 실패 → 이어보기 조용히 스킵
+                            }
+                        });
+                    }
+                } else {
+                    showResumeDialog(last, null);
+                }
             });
         });
+    }
+
+    /** 이어보기 다이얼로그. nasStreamUrl이 null이면 로컬 파일로 취급. */
+    private void showResumeDialog(PlaybackPosition last, String nasStreamUrl) {
+        boolean isNas = nasStreamUrl != null;
+        String playUri = isNas ? nasStreamUrl : last.uri;
+        final String finalUri = playUri;
+
+        new AlertDialog.Builder(this)
+                .setTitle("재생할까요?")
+                .setMessage("마지막으로 재생하던 영상을 이어서 봅니다.\n\n"
+                        + (last.name != null ? last.name : "알 수 없는 파일"))
+                .setPositiveButton("예", (dialog, which) -> {
+                    if (!isNas && last.bucketId != null) {
+                        List<VideoItem> videos = queryVideosInBucket(last.bucketId);
+                        if (!videos.isEmpty()) {
+                            PlaylistHolder.playlist = videos;
+                            int idx = -1;
+                            for (int i = 0; i < videos.size(); i++) {
+                                if (videos.get(i).uri.toString().equals(last.uri)) { idx = i; break; }
+                            }
+                            PlaylistHolder.currentIndex = idx >= 0 ? idx : 0;
+                        }
+                    }
+                    if (isNas) {
+                        // NAS 탭으로 자동 전환
+                        tabLayout.selectTab(tabLayout.getTabAt(TAB_NAS));
+                    }
+                    playVideo(Uri.parse(finalUri), last.name);
+                })
+                .setNegativeButton("아니오", (d, w) ->
+                        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                                .putInt(KEY_LAST_STATE, 0).apply())
+                .show();
     }
 
     private void loadBucketList() {

@@ -50,10 +50,13 @@ public class NasCredentialStore {
         return !getBaseUrl().isEmpty() && !getUser().isEmpty() && !getPass().isEmpty();
     }
 
-    public String getBaseUrl()  { return prefs.getString(KEY_BASE_URL,  DsFileConfig.BASE_URL);  }
-    public String getLanUrl()   { return prefs.getString(KEY_LAN_URL,   DsFileConfig.LAN_URL);   }
-    public String getUser()     { return prefs.getString(KEY_USER,      DsFileConfig.USER);      }
-    public String getPass()     { return prefs.getString(KEY_PASS,      DsFileConfig.PASS);      }
+    // 자격증명(URL/계정)은 DsFileConfig fallback 없음 — 저장된 값이 없으면 빈 문자열 반환
+    // hasCredentials()가 false를 돌려보내 최초 설정 화면으로 유도
+    public String getBaseUrl()  { return prefs.getString(KEY_BASE_URL,  ""); }
+    public String getLanUrl()   { return prefs.getString(KEY_LAN_URL,   ""); }
+    public String getUser()     { return prefs.getString(KEY_USER,      ""); }
+    public String getPass()     { return prefs.getString(KEY_PASS,      ""); }
+    // 경로는 민감 정보 아님 — 기본값 유지
     public String getBasePath() { return prefs.getString(KEY_BASE_PATH, DsFileConfig.BASE_PATH); }
     public String getPosDir()   { return prefs.getString(KEY_POS_DIR,   DsFileConfig.POS_DIR);   }
 

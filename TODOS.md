@@ -100,3 +100,77 @@ Updated 2026-04-10 (eng-review fixes + basePath/posDir UI + quality/subtitle fix
 
 **Effort:** S (human: ~2h / CC: ~20min)
 **Depends on:** Nothing (SharedPreferences approach) / Room migration v3 (per-URI approach)
+
+---
+
+## ✅ P1 — 최초 설치 시 NAS 인증 정보 입력 강제 + 기본값 제거 (DONE 2026-04-10)
+
+**What:** 최초 설치 후 앱을 처음 실행하면 NAS 사용자 ID / 비밀번호 입력 화면을 반드시 표시한다. `DsFileConfig`의 hardcoded 기본값(HOST, USER, PASS 등)을 제거한다.
+
+**Why:** 현재는 `DsFileConfig`에 하드코딩된 자격증명이 fallback으로 남아 있어, 앱을 다시 빌드하지 않으면 다른 NAS 계정에서 사용할 수 없다. 또한 소스코드에 실제 NAS 비밀번호가 노출된다.
+
+**Pros:**
+- 자격증명이 소스코드에서 완전히 제거됨 (보안 개선)
+- 다른 사람이 동일 APK를 설치해 자신의 NAS를 연결할 수 있음
+- `NasSetupActivity` 흐름이 실질적으로 의미 있게 됨
+
+**Cons:**
+- 최초 실행 시 설정 단계가 추가됨 (1회성, 이후 저장됨)
+
+**Context:**
+- `DsFileConfig.java` — HOST, PORT, USER, PASS, BASE_PATH, POS_DIR 상수를 빈 문자열(`""`) 또는 `0`으로 변경. 코드에서 fallback으로 사용되지 않도록 `NasCredentialStore`가 저장값 없으면 setup 화면으로 라우팅
+- `NasCredentialStore.java` — `hasCredentials()` 메서드 추가: HOST + USER + PASS 모두 비어있지 않을 때만 true 반환
+- `FileListActivity.java` — NAS 탭 최초 진입 시(또는 앱 시작 시) `credStore.hasCredentials()`가 false이면 `NasSetupActivity` 강제 시작 (현재는 자격증명이 없으면 DsFileConfig 기본값으로 연결 시도)
+- `NasSetupActivity.java` — 저장 후 `FileListActivity`로 돌아올 때 자동 연결 시작
+
+**Effort:** S (human: ~1h / CC: ~15min)
+**Depends on:** Nothing.
+
+---
+
+## ✅ P2 — NAS 영상 이어보기 (앱 재시작 시 resume 다이얼로그) (DONE 2026-04-10)
+
+**What:** 마지막으로 재생한 영상이 NAS 파일일 때, 앱을 재시작하면 로컬과 동일하게 "이어서 볼까요?" 다이얼로그를 표시한다.
+
+**Why:** 현재 `checkLastPlayback()`은 NAS 파일 감지 시 `nasSid == null`이면 조용히 스킵한다. `checkLastPlayback()`은 앱 시작 직후 호출되지만, NAS 연결(`connectNas()`)은 NAS 탭을 처음 눌러야 시작되므로 SID가 항상 null이다.
+
+**Root cause:** 타이밍 문제. NAS SID 획득 전에 resume 체크가 완료된다.
+
+**Fix 방향:**
+- `checkLastPlayback()`에서 마지막 URI가 NAS URL임을 감지하면 → `connectNas()`를 먼저 실행하고, 로그인 콜백 안에서 다이얼로그를 표시한다.
+- 기존 `if (isNas && nasSid == null) return;` 블록을 `connectAndResume()` 호출로 교체.
+- 로그인 실패 시 resume 다이얼로그 표시 안 함 (현재와 동일 동작).
+
+**Context:**
+- `FileListActivity.java:237` — `if (isNas && nasSid == null) { return; }` ← 이 부분 수정
+- NAS resume 시 NAS 탭도 자동 선택하면 UX가 더 자연스러움 (선택적)
+- NAS playlist 복원은 현재 불가 (NAS는 `PlaylistHolder`로 playlist를 넘기지 않음). 단일 파일 재생으로 충분.
+
+**Effort:** S (human: ~1h / CC: ~15min)
+**Depends on:** Nothing.
+
+---
+
+## P2 — 외부 네트워크(모바일 데이터)에서 NAS 접속 지원
+
+**What:** Wi-Fi(로컬 LAN) 환경에서는 연결되지만 외부 네트워크(모바일 데이터, 외부 Wi-Fi)에서는 NAS 접속 불가. 외부에서도 동일하게 사용할 수 있도록 한다.
+
+**Why:** 현재 `DsFileApiClient`는 LAN URL(`LAN_URL`)을 먼저 시도하고 실패하면 base URL로 전환하는 구조다. 외부에서 접속하려면 포트 포워딩이나 QuickConnect/DDNS 같은 외부 접근 경로가 필요하다.
+
+**가능한 접근 방법:**
+1. **QuickConnect 사용**: Synology QuickConnect ID(예: `gomji17.tw3.quickconnect.to`)를 `BASE_URL`로 설정하면 외부 접속 지원됨. DSM의 QuickConnect 활성화 필요.
+2. **DDNS + 포트 포워딩**: 공유기에서 NAS의 5000/5001 포트를 외부에 열고 DDNS 주소를 `BASE_URL`로 설정.
+3. **LAN/외부 자동 전환 개선**: `DsFileApiClient`가 LAN 연결 실패 시 `BASE_URL`로 자동 폴백하는 로직이 이미 있음. 현재 폴백이 제대로 동작하는지 확인 필요.
+
+**진단 포인트:**
+- `NasSetupActivity`에서 `BASE_URL`에 외부 접근 주소(QuickConnect URL 또는 DDNS)가 입력되어 있는지 확인
+- `DsFileApiClient.login()` — LAN 실패 후 BASE_URL 재시도 로직 동작 확인 (`adb logcat -s DsFileApi`)
+- HTTPS/HTTP 설정(`USE_HTTPS`) 확인 — QuickConnect는 HTTPS만 지원
+
+**Context:**
+- `DsFileApiClient.java` — `login()` 내 LAN → BASE_URL 폴백 로직
+- `NasSetupActivity.java` — BASE_URL 입력 필드 (현재는 QuickConnect URL 입력 가능)
+- `NasCredentialStore.java` — `getLanUrl()` / `getBaseUrl()`
+
+**Effort:** S~M (환경에 따라 다름 — QuickConnect URL만 맞게 입력하면 이미 동작할 수도 있음)
+**Depends on:** P1(최초 설치 인증 UI) 완료 후 진행.
