@@ -63,6 +63,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     private static final String PREFS_NAME    = "player_prefs";
     private static final String KEY_SCREEN_MODE = "screen_mode";
     private static final String KEY_LAST_STATE = "last_app_state";
+    private static final String KEY_PLAYBACK_SPEED = "playback_speed";
 
     private NasSyncManager nasSyncManager;
 
@@ -83,6 +84,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     private TextView tvTitle;
     private ImageButton btnOptions;
     private ImageButton btnRotationLock;
+    private TextView btnSpeed;
     private ImageButton btnPlayPause;
     private ImageButton btnRewind;
     private ImageButton btnFastForward;
@@ -163,6 +165,12 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         tvTitle          = findViewById(R.id.tvTitle);
         btnOptions       = findViewById(R.id.btnOptions);
         btnRotationLock  = findViewById(R.id.btnRotationLock);
+        btnSpeed         = findViewById(R.id.btnSpeed);
+
+        // 저장된 배속 불러와서 버튼 텍스트 초기화
+        float savedSpeed = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getFloat(KEY_PLAYBACK_SPEED, 1.0f);
+        btnSpeed.setText(formatSpeed(savedSpeed));
         btnPlayPause     = findViewById(R.id.btnPlayPause);
         btnRewind        = findViewById(R.id.btnRewind);
         btnFastForward   = findViewById(R.id.btnFastForward);
@@ -771,6 +779,11 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             resetHideTimer();
         });
 
+        btnSpeed.setOnClickListener(v -> {
+            handler.removeCallbacks(hideControls);
+            showSpeedDialog();
+        });
+
         btnRotationLock.setOnClickListener(v -> {
             rotationLocked = !rotationLocked;
             if (rotationLocked) {
@@ -843,6 +856,40 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         handler.postDelayed(hideControls, CONTROLS_HIDE_DELAY_MS);
     }
 
+    private static final float[] SPEED_VALUES = {0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f};
+    private static final String[] SPEED_LABELS = {"0.5×", "0.75×", "1.0×", "1.25×", "1.5×", "2.0×"};
+
+    private String formatSpeed(float speed) {
+        if (speed == 0.5f)  return "0.5×";
+        if (speed == 0.75f) return "0.75×";
+        if (speed == 1.25f) return "1.25×";
+        if (speed == 1.5f)  return "1.5×";
+        if (speed == 2.0f)  return "2.0×";
+        return "1.0×";
+    }
+
+    private void showSpeedDialog() {
+        float current = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getFloat(KEY_PLAYBACK_SPEED, 1.0f);
+        int checkedIdx = 2; // 기본 1.0×
+        for (int i = 0; i < SPEED_VALUES.length; i++) {
+            if (Math.abs(SPEED_VALUES[i] - current) < 0.01f) { checkedIdx = i; break; }
+        }
+        new android.app.AlertDialog.Builder(this)
+                .setTitle("재생 속도")
+                .setSingleChoiceItems(SPEED_LABELS, checkedIdx, (dialog, which) -> {
+                    float chosen = SPEED_VALUES[which];
+                    getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                            .putFloat(KEY_PLAYBACK_SPEED, chosen).apply();
+                    btnSpeed.setText(SPEED_LABELS[which]);
+                    if (mediaPlayer != null) mediaPlayer.setRate(chosen);
+                    dialog.dismiss();
+                    resetHideTimer();
+                })
+                .setNegativeButton("취소", (dialog, w) -> resetHideTimer())
+                .show();
+    }
+
     private void showOptionsMenu() {
         if (mediaPlayer != null && mediaPlayer.isPlaying()) mediaPlayer.pause();
         String[] items = {"자막 선택", "오디오 선택", "화면 모드 설정", "초기화"};
@@ -895,6 +942,13 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         int savedMode = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getInt(KEY_SCREEN_MODE, 0);
         applyScreenMode(savedMode);
         currentScreenMode = savedMode;
+
+        // 저장된 배속 적용
+        float savedSpeed = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getFloat(KEY_PLAYBACK_SPEED, 1.0f);
+        if (savedSpeed != 1.0f) {
+            mediaPlayer.setRate(savedSpeed);
+        }
     }
 
     private void showSubtitleDialog() {

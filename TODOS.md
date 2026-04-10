@@ -86,7 +86,7 @@ Updated 2026-04-10 (eng-review fixes + basePath/posDir UI + quality/subtitle fix
 
 ---
 
-## P3 — Playback speed control
+## ✅ P3 — Playback speed control (DONE 2026-04-10)
 
 **What:** Add variable playback speed (0.5×, 0.75×, 1.0×, 1.25×, 1.5×, 2.0×) to the player UI.
 
