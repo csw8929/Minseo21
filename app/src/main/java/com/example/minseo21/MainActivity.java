@@ -259,14 +259,22 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         options.add("--aout=opensles");
         // SW 디코더 스레드 수: Xvid/DivX 등 HW 가속 불가 코덱의 소프트웨어 폴백 성능 향상
         options.add("--avcodec-threads=4");
-        // 캐싱: 로컬 500ms / NAS 5000ms — NAS 환경에서 AVI 스트리밍 안정성 확보
-        options.add(isNetwork ? "--network-caching=5000" : "--file-caching=500");
+        // 릴레이 연결 여부: direct.quickconnect.to 또는 quickconnect.to 경유 시 레이턴시 높음
+        boolean isRelay = isNetwork && DsFileApiClient.isRelayUrl(videoUri.toString());
+        // 캐싱: 로컬 500ms / NAS 5000ms / 릴레이 15000ms
+        // 릴레이(대만 서버 경유)는 RTT ~560ms + 대역폭 제한 → 대형 버퍼 필요
+        options.add(isRelay ? "--network-caching=15000" : isNetwork ? "--network-caching=5000" : "--file-caching=500");
         options.add("--live-caching=300");
         if (isNetwork) {
             // NAS 스트리밍: 클럭 지터 허용 + 동기화 활성화
             // AVI 컨테이너는 타이밍 메타데이터가 부정확해 jitter=0/synchro=0이면
             // SurfaceTexture 버퍼 슬롯 고갈(BufferQueueProducer timeout) 발생
-            options.add("--clock-jitter=500");
+            // 릴레이: RTT ~560ms → jitter=2000 으로 클록 리셋 방지
+            options.add(isRelay ? "--clock-jitter=2000" : "--clock-jitter=500");
+            if (isRelay) {
+                // 릴레이 연결 끊김 시 자동 재연결
+                options.add("--http-reconnect");
+            }
         } else {
             options.add("--clock-jitter=0");
             options.add("--clock-synchro=0");
