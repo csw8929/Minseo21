@@ -45,18 +45,17 @@ public class NasCredentialStore {
         this.prefs = p;
     }
 
-    /** 저장된 인증 정보가 있는지 (최소한 BASE_URL + USER + PASS). */
+    /** 저장된 인증 정보가 있는지 (USER + PASS 모두 입력됐으면 충분). */
     public boolean hasCredentials() {
-        return !getBaseUrl().isEmpty() && !getUser().isEmpty() && !getPass().isEmpty();
+        return !getUser().isEmpty() && !getPass().isEmpty();
     }
 
-    // 자격증명(URL/계정)은 DsFileConfig fallback 없음 — 저장된 값이 없으면 빈 문자열 반환
-    // hasCredentials()가 false를 돌려보내 최초 설정 화면으로 유도
-    public String getBaseUrl()  { return prefs.getString(KEY_BASE_URL,  ""); }
-    public String getLanUrl()   { return prefs.getString(KEY_LAN_URL,   ""); }
+    // URL은 DsFileConfig 기본값 사용 (주소는 앱에 고정)
+    public String getBaseUrl()  { return prefs.getString(KEY_BASE_URL,  DsFileConfig.BASE_URL);  }
+    public String getLanUrl()   { return prefs.getString(KEY_LAN_URL,   DsFileConfig.LAN_URL);   }
+    // 계정정보는 저장된 값만 사용 — 없으면 빈 문자열 → hasCredentials() false → 설정 화면 표시
     public String getUser()     { return prefs.getString(KEY_USER,      ""); }
     public String getPass()     { return prefs.getString(KEY_PASS,      ""); }
-    // 경로는 민감 정보 아님 — 기본값 유지
     public String getBasePath() { return prefs.getString(KEY_BASE_PATH, DsFileConfig.BASE_PATH); }
     public String getPosDir()   { return prefs.getString(KEY_POS_DIR,   DsFileConfig.POS_DIR);   }
 
