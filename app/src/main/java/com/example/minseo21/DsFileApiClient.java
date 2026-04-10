@@ -20,8 +20,11 @@ import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -103,13 +106,51 @@ public class DsFileApiClient {
                     resolvedBase = (resolved != null) ? resolved : cfgBaseUrl;
                     Log.i(TAG, "resolvedBase=" + resolvedBase);
                 }
+                // QuickConnect relay 사용 시: 포털 쿠키 먼저 획득 후 로그인 시도
+                String relayCookie = null;
+                if (resolvedBase.contains("quickconnect.to")) {
+                    relayCookie = getRelayCookie(resolvedBase);
+                    if (relayCookie != null) {
+                        Log.d(TAG, "relay cookie 획득: " + relayCookie.substring(0, Math.min(40, relayCookie.length())));
+                    }
+                }
+
                 String url = resolvedBase + "/webapi/auth.cgi"
                         + "?api=SYNO.API.Auth&version=6&method=login"
                         + "&account=" + URLEncoder.encode(cfgUser, "UTF-8")
                         + "&passwd=" + URLEncoder.encode(cfgPass, "UTF-8")
                         + "&session=FileStation&format=sid";
-                Log.d(TAG, "login → " + cfgBaseUrl);
-                String body = httpGet(url);
+                Log.d(TAG, "login → " + cfgBaseUrl + (relayCookie != null ? " [with relay cookie]" : ""));
+                String body = httpGetWithCookie(url, relayCookie);
+                if (body.startsWith("<")) {
+                    // QuickConnect 릴레이가 포털 HTML 반환 — path prefix 없이 접속한 경우
+                    Log.w(TAG, "QuickConnect relay HTML 응답 (resolvedBase=" + resolvedBase + "): "
+                            + body.substring(0, Math.min(300, body.length())).replaceAll("\\s+", " "));
+                    java.util.regex.Matcher tm = Pattern.compile("<title>([^<]{0,80})</title>").matcher(body);
+                    if (tm.find()) Log.w(TAG, "relay HTML title: " + tm.group(1));
+                    // /https_first path prefix 를 붙여 재시도
+                    if (!resolvedBase.endsWith("/https_first") && resolvedBase.contains("quickconnect.to")) {
+                        String withPrefix = resolvedBase.replaceAll("/$", "") + "/https_first";
+                        Log.d(TAG, "relay /https_first prefix 재시도: " + withPrefix);
+                        String probe = withPrefix + "/webapi/auth.cgi"
+                                + "?api=SYNO.API.Auth&version=6&method=login"
+                                + "&account=" + URLEncoder.encode(cfgUser, "UTF-8")
+                                + "&passwd=" + URLEncoder.encode(cfgPass, "UTF-8")
+                                + "&session=FileStation&format=sid";
+                        String body2 = httpGet(probe);
+                        if (!body2.startsWith("<")) {
+                            Log.d(TAG, "relay /https_first 응답: " + body2.substring(0, Math.min(100, body2.length())));
+                            resolvedBase = withPrefix;
+                            body = body2; // 아래 JSON 파싱으로 계속
+                        } else {
+                            throw new Exception("QuickConnect 외부 접속 실패 (HTML응답).\n"
+                                    + "DSM > 제어판 > QuickConnect 에서 연결 상태를 확인해주세요.");
+                        }
+                    } else {
+                        throw new Exception("QuickConnect 외부 접속 실패 (HTML응답).\n"
+                                + "DSM > 제어판 > QuickConnect 에서 연결 상태를 확인해주세요.");
+                    }
+                }
                 JSONObject json = new JSONObject(body);
                 if (json.optBoolean("success", false)) {
                     String sid = json.getJSONObject("data").getString("sid");
@@ -281,6 +322,11 @@ public class DsFileApiClient {
         return url != null && url.contains("/webapi/entry.cgi");
     }
 
+    /** 릴레이 경유 URL 여부 — direct.quickconnect.to 또는 quickconnect.to 포함 시 true */
+    public static boolean isRelayUrl(String url) {
+        return url != null && url.contains("quickconnect.to");
+    }
+
     // ── 위치 동기화 (NAS JSON 파일) ──────────────────────────────────────────
 
     /**
@@ -348,25 +394,137 @@ public class DsFileApiClient {
 
     // ── 내부 유틸 ────────────────────────────────────────────────────────────
 
-    private static String httpGet(String urlStr) throws Exception {
-        // 리다이렉트를 최대 5회까지 수동으로 따라감 (HTTPS→HTTPS 포함)
+    /**
+     * QuickConnect relay 포털 페이지에서 세션 쿠키를 가져옴.
+     * 포털이 쿠키 기반으로 relay 세션을 인증하는 경우 이 쿠키가 필요.
+     * 반환값: "name=value; name2=value2" 형태 또는 null
+     */
+    private static String getRelayCookie(String relayBase) {
+        try {
+            HttpURLConnection conn = openTrustedConnection(relayBase + "/");
+            conn.setConnectTimeout(5000);
+            conn.setReadTimeout(5000);
+            conn.setRequestMethod("GET");
+            conn.setInstanceFollowRedirects(false);
+            conn.setRequestProperty("User-Agent", BROWSER_UA);
+            conn.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+            conn.setRequestProperty("Referer", "https://quickconnect.to/");
+            int code = conn.getResponseCode();
+            java.util.List<String> setCookies = conn.getHeaderFields().get("Set-Cookie");
+            conn.disconnect();
+            if (setCookies == null || setCookies.isEmpty()) return null;
+            StringBuilder sb = new StringBuilder();
+            for (String c : setCookies) {
+                String nameVal = c.split(";")[0].trim();
+                if (sb.length() > 0) sb.append("; ");
+                sb.append(nameVal);
+                Log.d(TAG, "relay portal cookie: " + nameVal);
+            }
+            return sb.length() > 0 ? sb.toString() : null;
+        } catch (Exception e) {
+            Log.d(TAG, "getRelayCookie 실패: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * GET 요청 — 초기 쿠키를 지정 가능 (relay 세션 쿠키 전달용).
+     * null 이면 일반 httpGet 과 동일.
+     */
+    private static String httpGetWithCookie(String urlStr, String initialCookie) throws Exception {
+        if (initialCookie == null || initialCookie.isEmpty()) return httpGet(urlStr);
         String currentUrl = urlStr;
+        StringBuilder cookieHeader = new StringBuilder(initialCookie);
         for (int redirect = 0; redirect < 5; redirect++) {
             HttpURLConnection conn = openTrustedConnection(currentUrl);
             conn.setConnectTimeout(CONNECT_TIMEOUT);
             conn.setReadTimeout(READ_TIMEOUT);
             conn.setRequestMethod("GET");
-            conn.setInstanceFollowRedirects(false); // 수동 처리
-
+            conn.setInstanceFollowRedirects(false);
+            conn.setRequestProperty("User-Agent", BROWSER_UA);
+            conn.setRequestProperty("Accept", "application/json, text/plain, */*");
+            conn.setRequestProperty("Cookie", cookieHeader.toString());
             int code = conn.getResponseCode();
-            Log.d(TAG, "HTTP " + code + " ← " + currentUrl.replaceAll("passwd=[^&]+", "passwd=***"));
-
-            // 리다이렉트 처리
+            Log.d(TAG, "HTTP(cookie) " + code + " ← " + currentUrl.replaceAll("passwd=[^&]+", "passwd=***"));
+            java.util.List<String> cookies = conn.getHeaderFields().get("Set-Cookie");
+            if (cookies != null) {
+                for (String c : cookies) {
+                    String n = c.split(";")[0].trim();
+                    if (cookieHeader.length() > 0) cookieHeader.append("; ");
+                    cookieHeader.append(n);
+                }
+            }
             if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
                 String location = conn.getHeaderField("Location");
                 conn.disconnect();
                 if (location == null) throw new Exception("Redirect without Location");
-                // 상대 경로 처리
+                if (!location.startsWith("http")) {
+                    URL base = new URL(currentUrl);
+                    location = base.getProtocol() + "://" + base.getHost()
+                            + (base.getPort() > 0 ? ":" + base.getPort() : "") + location;
+                }
+                currentUrl = location;
+                continue;
+            }
+            InputStream is = (code < 400) ? conn.getInputStream() : conn.getErrorStream();
+            if (is == null) { conn.disconnect(); throw new Exception("HTTP " + code + " — empty body"); }
+            StringBuilder sb = new StringBuilder();
+            try (BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+                String line; while ((line = br.readLine()) != null) sb.append(line);
+            }
+            conn.disconnect();
+            String body = sb.toString();
+            if (body.isEmpty()) throw new Exception("HTTP " + code + " — empty body");
+            return body;
+        }
+        throw new Exception("Too many redirects: " + urlStr);
+    }
+
+    private static final String BROWSER_UA =
+            "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 "
+            + "(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36";
+
+    private static String httpGet(String urlStr) throws Exception {
+        // 리다이렉트를 최대 5회까지 수동으로 따라감. 쿠키를 수집해 다음 요청으로 전달.
+        String currentUrl = urlStr;
+        StringBuilder cookieHeader = new StringBuilder();
+        for (int redirect = 0; redirect < 5; redirect++) {
+            HttpURLConnection conn = openTrustedConnection(currentUrl);
+            conn.setConnectTimeout(CONNECT_TIMEOUT);
+            conn.setReadTimeout(READ_TIMEOUT);
+            conn.setRequestMethod("GET");
+            conn.setInstanceFollowRedirects(false);
+            conn.setRequestProperty("User-Agent", BROWSER_UA);
+            conn.setRequestProperty("Accept", "application/json, text/plain, */*");
+            if (cookieHeader.length() > 0) {
+                conn.setRequestProperty("Cookie", cookieHeader.toString());
+            }
+
+            int code = conn.getResponseCode();
+            Log.d(TAG, "HTTP " + code + " ← " + currentUrl.replaceAll("passwd=[^&]+", "passwd=***"));
+
+            // Set-Cookie 수집 (쿠키를 다음 리다이렉트 요청으로 전달)
+            java.util.List<String> cookies = conn.getHeaderFields().get("Set-Cookie");
+            if (cookies != null) {
+                for (String cookie : cookies) {
+                    String cookieName = cookie.split(";")[0].trim();
+                    Log.d(TAG, "Set-Cookie: " + cookieName);
+                    if (cookieHeader.length() > 0) cookieHeader.append("; ");
+                    cookieHeader.append(cookieName);
+                }
+            }
+
+            // 리다이렉트 처리
+            if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
+                String location = conn.getHeaderField("Location");
+                // 특이 헤더 로깅 (relay 토큰 등)
+                for (String hk : conn.getHeaderFields().keySet()) {
+                    if (hk != null && (hk.startsWith("X-") || hk.startsWith("x-"))) {
+                        Log.d(TAG, "Header " + hk + ": " + conn.getHeaderField(hk));
+                    }
+                }
+                conn.disconnect();
+                if (location == null) throw new Exception("Redirect without Location");
                 if (!location.startsWith("http")) {
                     URL base = new URL(currentUrl);
                     location = base.getProtocol() + "://" + base.getHost()
@@ -398,9 +556,9 @@ public class DsFileApiClient {
 
     /**
      * Synology QuickConnect URL에서 실제 NAS 접속 주소를 해석.
-     * 0) 같은 LAN의 ARP 테이블에서 Synology MAC 장치를 탐지 (최우선)
-     * 1) global → regional Serv.php POST 로 서버 정보 수집
-     * 2) 후보 URL 목록(LAN IP, DDNS, 외부 IP) 순으로 probe 하여 최초 응답 반환
+     * 0) LAN_URL 설정된 경우 먼저 probe
+     * 1) global/regional Serv.php POST 로 서버 정보 수집 → 외부 IP/DDNS/relay 후보 병렬 probe
+     * 2) 모두 실패 시 baseUrl 자체를 직접 probe (QuickConnect relay 경로)
      */
     private static String resolveQuickConnect(String baseUrl) {
         try {
@@ -410,48 +568,446 @@ public class DsFileApiClient {
             String qcId = host.split("\\.")[0];
             Log.d(TAG, "QuickConnect ID: " + qcId);
 
-            // ── Step 0: LAN_URL 설정된 경우 먼저 probe ──────────────────────
-            String lanUrl = cfgLanUrl;
-            if (lanUrl != null && !lanUrl.isEmpty()) {
-                for (String candidate : new String[]{
-                        lanUrl,
-                        lanUrl + ":5001",
-                        lanUrl.replace("https://", "http://") + ":5000"}) {
-                    if (probeUrl(candidate)) {
-                        Log.i(TAG, "LAN NAS 연결 성공: " + candidate);
-                        return candidate;
-                    }
+            // Step 0: LAN_URL 단일 probe
+            if (cfgLanUrl != null && !cfgLanUrl.isEmpty()) {
+                if (probeUrl(cfgLanUrl)) {
+                    Log.i(TAG, "LAN NAS 연결 성공: " + cfgLanUrl);
+                    return cfgLanUrl;
                 }
                 Log.d(TAG, "LAN_URL probe 실패, QuickConnect 시도");
             }
 
-            // Step 1: global GET → regional 서버 hostname 반환 (예: "usc.quickconnect.to")
-            String servParams = "?id=" + qcId + "&port=5001&stopReason=0"
-                    + "&compound=%5B%7B%22api%22%3A%22SYNO.API.Info%22%2C%22method%22%3A%22query%22%2C%22version%22%3A1%7D%5D";
-            String resp1 = httpGet("https://global.quickconnect.to/Serv.php" + servParams);
-            Log.d(TAG, "global: " + resp1.substring(0, Math.min(200, resp1.length())));
+            // Step 0a: Synology direct.quickconnect.to 릴레이 (DS File 이 실제로 사용하는 경로)
+            // 형식: http://synr-{region}.{QCID-upper}.direct.quickconnect.to:{port}
+            // cfgBaseUrl 호스트에서 리전 추출 (예: gomji17.tw3.quickconnect.to → tw3)
+            {
+                String qcIdUpper = qcId.toUpperCase();
+                // URL 에서 리전 추출
+                String[] hp = host.split("\\.");
+                // hp = ["gomji17", "tw3", "quickconnect", "to"] → region = hp[1] if length>=4
+                String region = (hp.length >= 4) ? hp[1] : null;
 
-            List<String> candidates = new ArrayList<>();
-            collectCandidates(resp1, candidates);
+                // 시도할 릴레이 포트 (Synology 릴레이는 16811, 6690, 443, 80 등 사용)
+                int[] relayPorts = {16811, 16812, 6690, 443, 80};
 
-            // Step 2: regional 서버에 GET → 실제 NAS 서버 정보 JSON
-            String regional = resp1.trim();
-            if (!regional.startsWith("{") && !regional.isEmpty() && regional.length() < 100) {
-                try {
-                    String resp2 = httpGet("https://" + regional + "/Serv.php" + servParams);
-                    Log.d(TAG, regional + ": " + resp2.substring(0, Math.min(300, resp2.length())));
-                    collectCandidates(resp2, candidates);
-                } catch (Exception ignored) {}
+                List<String> directCandidates = new ArrayList<>();
+                if (region != null) {
+                    for (int rp : relayPorts) {
+                        directCandidates.add("http://synr-" + region + "." + qcIdUpper + ".direct.quickconnect.to:" + rp);
+                        directCandidates.add("https://synr-" + region + "." + qcIdUpper + ".direct.quickconnect.to:" + rp);
+                    }
+                }
+                // 리전 없이도 시도
+                for (int rp : relayPorts) {
+                    directCandidates.add("http://synr." + qcIdUpper + ".direct.quickconnect.to:" + rp);
+                    directCandidates.add("http://" + qcIdUpper + ".direct.quickconnect.to:" + rp);
+                }
+                Log.d(TAG, "direct.quickconnect.to relay probe 시작 (region=" + region + "): "
+                        + directCandidates.subList(0, Math.min(4, directCandidates.size())));
+                String winner = probeBestUrl(directCandidates);
+                if (winner != null) {
+                    Log.i(TAG, "direct.quickconnect.to relay 연결 성공: " + winner);
+                    return winner;
+                }
+                Log.d(TAG, "direct.quickconnect.to relay probe 실패, 다음 단계 시도");
             }
 
-            Log.d(TAG, "QuickConnect candidates: " + candidates);
-            // 가장 먼저 응답하는 URL 사용 (3초 타임아웃)
-            for (String url : candidates) {
-                if (probeUrl(url)) {
-                    Log.i(TAG, "QuickConnect resolved: " + url);
-                    return url;
+            // Step 0b: DDNS / 외부 IP 직접 probe (QuickConnect 우회 — 포트포워딩 환경)
+            // Synology DDNS (xxx.synology.me) 와 공인 IP 를 사용하면 릴레이 없이 직접 접속 가능
+            {
+                List<String> directCandidates = new ArrayList<>();
+                // DsFileConfig 에 설정된 DDNS/외부 IP — DSM 기본 포트 + 표준 웹 포트
+                String[] nasHosts;
+                if (!DsFileConfig.DDNS_HOST.isEmpty() && !DsFileConfig.EXTERNAL_IP.isEmpty()) {
+                    nasHosts = new String[]{ DsFileConfig.DDNS_HOST, DsFileConfig.EXTERNAL_IP,
+                            qcId + ".synology.me" };
+                } else if (!DsFileConfig.DDNS_HOST.isEmpty()) {
+                    nasHosts = new String[]{ DsFileConfig.DDNS_HOST, qcId + ".synology.me" };
+                } else if (!DsFileConfig.EXTERNAL_IP.isEmpty()) {
+                    nasHosts = new String[]{ DsFileConfig.EXTERNAL_IP, qcId + ".synology.me" };
+                } else {
+                    nasHosts = new String[]{ qcId + ".synology.me" };
+                }
+                for (String h : nasHosts) {
+                    directCandidates.add("https://" + h + ":5001");
+                    directCandidates.add("http://"  + h + ":5000");
+                    directCandidates.add("https://" + h + ":443");
+                    directCandidates.add("http://"  + h + ":80");
+                }
+
+                // DNS 해석이 실패한 경우 DoH(DNS over HTTPS) 로 gomji17.synology.me 의 IP 를 직접 조회
+                if (!DsFileConfig.DDNS_HOST.isEmpty()) {
+                    String dohIp = resolveDoh(DsFileConfig.DDNS_HOST);
+                    if (dohIp != null) {
+                        Log.d(TAG, "DoH resolved " + DsFileConfig.DDNS_HOST + " → " + dohIp);
+                        directCandidates.add(0, "https://" + dohIp + ":5001");
+                        directCandidates.add(1, "http://"  + dohIp + ":5000");
+                        directCandidates.add(2, "https://" + dohIp + ":443");
+                    }
+                }
+
+                if (!directCandidates.isEmpty()) {
+                    Log.d(TAG, "DDNS/외부 IP 직접 probe 시작: " + directCandidates);
+                    String winner = probeBestUrl(directCandidates);
+                    if (winner != null) {
+                        Log.i(TAG, "DDNS/외부 IP 직접 연결 성공: " + winner);
+                        return winner;
+                    }
+                    Log.d(TAG, "DDNS/외부 IP probe 실패, QuickConnect relay 시도");
                 }
             }
+
+            String payload = new JSONObject()
+                    .put("version", 1)
+                    .put("command", "get_server_info")
+                    .put("stop_when_error", false)
+                    .put("stop_when_connected", false)
+                    .put("id", qcId)
+                    .put("serverID", qcId)
+                    .put("is_force_redirect", true)  // relay 강제 요청
+                    .toString();
+
+            List<String> candidates = new ArrayList<>();
+
+            // Step 1: global GET → 리전 서버 이름 획득 (plain text 응답)
+            // e.g. "usc.quickconnect.to"
+            String regional = null;
+            try {
+                String globalResp = httpGet("https://global.quickconnect.to/Serv.php?id=" + qcId);
+                Log.d(TAG, "global GET: [" + globalResp.trim() + "]");
+                // plain text 리전 이름이면 바로 사용, JSON이면 candidates 파싱
+                if (globalResp.trim().startsWith("{")) {
+                    collectCandidates(globalResp, candidates);
+                } else if (!globalResp.trim().isEmpty()) {
+                    regional = globalResp.trim();
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "global GET 실패: " + e.getMessage());
+            }
+
+            // baseUrl 호스트명에서 리전 서버 추출 (e.g. gomji17.tw3.quickconnect.to → tw3.quickconnect.to)
+            // global GET이 지리적 위치 기반이라 NAS 등록 리전과 다를 수 있음
+            String urlRegional = null;
+            String[] hostParts = host.split("\\.");
+            // host = "gomji17.tw3.quickconnect.to" → parts = ["gomji17","tw3","quickconnect","to"]
+            if (hostParts.length >= 4) {
+                urlRegional = hostParts[1] + ".quickconnect.to"; // "tw3.quickconnect.to"
+            }
+            if (urlRegional != null && urlRegional.equals(regional)) urlRegional = null; // 중복 제거
+
+            // Step 2: 리전 서버에 POST → 실제 NAS 서버 정보 JSON
+            if (candidates.isEmpty() && regional != null && !regional.isEmpty()) {
+                try {
+                    String resp = httpPost("https://" + regional + "/Serv.php", payload);
+                    Log.d(TAG, regional + " POST: " + resp.substring(0, Math.min(400, resp.length())));
+                    collectCandidates(resp, candidates);
+                } catch (Exception e) {
+                    Log.w(TAG, regional + " POST 실패: " + e.getMessage());
+                }
+            }
+
+            // Step 2b: global 서버에 직접 POST (리전 서버가 errno:4인 경우 global이 라우팅해줄 수 있음)
+            if (candidates.isEmpty()) {
+                try {
+                    String resp = httpPost("https://global.quickconnect.to/Serv.php", payload);
+                    Log.d(TAG, "global POST: " + resp.substring(0, Math.min(400, resp.length())));
+                    collectCandidates(resp, candidates);
+                } catch (Exception e) {
+                    Log.w(TAG, "global POST 실패: " + e.getMessage());
+                }
+            }
+
+            // Step 2c: URL 기반 리전 서버 POST (global이 다른 지역 서버를 반환한 경우 보완)
+            if (candidates.isEmpty() && urlRegional != null) {
+                try {
+                    String resp = httpPost("https://" + urlRegional + "/Serv.php", payload);
+                    Log.d(TAG, urlRegional + " POST: " + resp.substring(0, Math.min(400, resp.length())));
+                    collectCandidates(resp, candidates);
+                } catch (Exception e) {
+                    Log.w(TAG, urlRegional + " POST 실패: " + e.getMessage());
+                }
+            }
+
+            // Step 3: check-item-permission — is_force_redirect:true/false 모두 시도
+            if (candidates.isEmpty()) {
+                // is_force_redirect:true = relay 강제 사용 요청 (relay_ip 정보 반환 기대)
+                // is_force_redirect:false = 직접 접속 우선 (기존 값)
+                String checkPayload = new JSONObject()
+                        .put("version", 1)
+                        .put("command", "check-item-permission")
+                        .put("id", qcId)
+                        .put("serverID", qcId)
+                        .put("is_force_redirect", true)  // relay 강제 요청으로 변경
+                        .toString();
+                // 3a: global 서버
+                try {
+                    String checkResp = httpPost("https://global.quickconnect.to/Serv.php", checkPayload);
+                    Log.d(TAG, "check-item-permission ← global: "
+                            + checkResp.substring(0, Math.min(400, checkResp.length())));
+                    collectCandidates(checkResp, candidates);
+                } catch (Exception e) {
+                    Log.w(TAG, "check-item-permission(global) 실패: " + e.getMessage());
+                }
+                // 3b: regional 서버
+                if (candidates.isEmpty() && regional != null && !regional.isEmpty()) {
+                    try {
+                        String checkResp = httpPost("https://" + regional + "/Serv.php", checkPayload);
+                        Log.d(TAG, "check-item-permission ← " + regional + ": "
+                                + checkResp.substring(0, Math.min(400, checkResp.length())));
+                        collectCandidates(checkResp, candidates);
+                    } catch (Exception e) {
+                        Log.w(TAG, "check-item-permission(" + regional + ") 실패: " + e.getMessage());
+                    }
+                }
+            }
+
+            // Step 3-v7: check-item-permission-v7 (DSM 7+ 용 업데이트된 명령)
+            if (candidates.isEmpty()) {
+                String v7Payload = new JSONObject()
+                        .put("version", 1)
+                        .put("command", "check-item-permission-v7")
+                        .put("id", qcId)
+                        .put("serverID", qcId)
+                        .put("is_force_redirect", true)  // relay 강제 요청
+                        .toString();
+                for (String srv : new String[]{"global.quickconnect.to",
+                        regional != null ? regional : "", urlRegional != null ? urlRegional : ""}) {
+                    if (srv.isEmpty()) continue;
+                    try {
+                        String resp = httpPost("https://" + srv + "/Serv.php", v7Payload);
+                        Log.d(TAG, "check-item-permission-v7 ← " + srv + ": "
+                                + resp.substring(0, Math.min(400, resp.length())));
+                        collectCandidates(resp, candidates);
+                        if (!candidates.isEmpty()) break;
+                    } catch (Exception e) {
+                        Log.w(TAG, "check-item-permission-v7(" + srv + ") 실패: " + e.getMessage());
+                    }
+                }
+            }
+
+            // Step 3c: 모든 알려진 Synology 리전 서버 병렬 조회
+            if (candidates.isEmpty()) {
+                String[] allRegionals = {"eu.quickconnect.to", "sgp.quickconnect.to",
+                        "apac.quickconnect.to", "usw.quickconnect.to", "usec.quickconnect.to",
+                        "tw.quickconnect.to", "cn.quickconnect.to"};
+                CountDownLatch latch = new CountDownLatch(allRegionals.length);
+                List<String> syncCandidates = java.util.Collections.synchronizedList(new ArrayList<>());
+                for (String srv : allRegionals) {
+                    if (srv.equals(regional)) { latch.countDown(); continue; }
+                    String srvFinal = srv;
+                    Thread t = new Thread(() -> {
+                        try {
+                            String resp = httpPost("https://" + srvFinal + "/Serv.php", payload);
+                            if (resp.contains("\"errno\":0") || resp.contains("external")) {
+                                Log.d(TAG, srvFinal + " POST 성공: " + resp.substring(0, Math.min(300, resp.length())));
+                                collectCandidates(resp, syncCandidates);
+                            } else {
+                                Log.d(TAG, srvFinal + " POST: " + resp.substring(0, Math.min(100, resp.length())));
+                            }
+                        } catch (Exception e) {
+                            Log.d(TAG, srvFinal + " POST 실패: " + e.getMessage());
+                        } finally { latch.countDown(); }
+                    });
+                    t.setDaemon(true);
+                    t.start();
+                }
+                try { latch.await(8, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+                candidates.addAll(syncCandidates);
+            }
+
+            Log.d(TAG, "QuickConnect candidates after get_server_info: " + candidates);
+            if (!candidates.isEmpty()) {
+                String winner = probeBestUrl(candidates);
+                if (winner != null) {
+                    Log.i(TAG, "QuickConnect resolved: " + winner);
+                    return winner;
+                }
+                Log.w(TAG, "후보 있으나 모두 probe 실패");
+                candidates.clear();
+            }
+
+            // Step 3c-pre: 포털 HTML 에서 controlHost 및 relay 설정 추출
+            // 포털이 global 이 아닌 다른 서버(예: tw3)를 controlHost 로 사용할 수 있음
+            String portalControlHost = null;
+            try {
+                String portalHtml = httpGet("http://" + qcId + ".quickconnect.to/");
+                Log.d(TAG, "portal HTML length=" + portalHtml.length() + " first512: "
+                        + portalHtml.substring(0, Math.min(512, portalHtml.length())).replaceAll("\\s+", " "));
+                // 포털 HTML 에서 controlHost 추출 (여러 패턴 시도)
+                String[] ctrlPatterns = {
+                    "controlHost[\"']?\\s*[:=]\\s*[\"']([^\"']+)[\"']",
+                    "control_host[\"']?\\s*[:=]\\s*[\"']([^\"']+)[\"']",
+                    "\"site\"\\s*:\\s*[\"']([^\"']+quickconnect\\.to[^\"']*)[\"']",
+                    "Serv\\.php[^\"']*[\"']([^\"']+quickconnect\\.to)[\"']",
+                };
+                for (String pat : ctrlPatterns) {
+                    java.util.regex.Matcher m = Pattern.compile(pat).matcher(portalHtml);
+                    if (m.find()) {
+                        portalControlHost = m.group(1).trim();
+                        Log.d(TAG, "포털 controlHost(" + pat.substring(0,20) + "): " + portalControlHost);
+                        break;
+                    }
+                }
+                // 포털 HTML 에서 JSON 블록 검색 (embedded config)
+                java.util.regex.Matcher mJson = Pattern.compile(
+                        "\\{[^{}]{0,2000}(?:relay_ip|external|ddns|serverID)[^{}]{0,2000}\\}"
+                ).matcher(portalHtml);
+                int jsonCount = 0;
+                while (mJson.find() && jsonCount < 3) {
+                    Log.d(TAG, "portal JSON block[" + jsonCount + "]: "
+                            + mJson.group(0).substring(0, Math.min(200, mJson.group(0).length())));
+                    jsonCount++;
+                }
+                // 스크립트 태그 안의 변수 할당 패턴 로그
+                java.util.regex.Matcher mVar = Pattern.compile(
+                        "(?:window\\.\\w+|var \\w+)\\s*=\\s*(\\{[^;]{10,300}\\})"
+                ).matcher(portalHtml);
+                int varCount = 0;
+                while (mVar.find() && varCount < 5) {
+                    Log.d(TAG, "portal var[" + varCount + "]: "
+                            + mVar.group(0).substring(0, Math.min(200, mVar.group(0).length())));
+                    varCount++;
+                }
+            } catch (Exception e) {
+                Log.d(TAG, "portal HTML 취득 실패: " + e.getMessage());
+            }
+
+            // Step 3d: request_tunnel — 포털 JS가 실제로 사용하는 relay 터널 요청 방식
+            // get_server_info 와 달리 JSON 배열로 전송, id:"mainapp_http" (논리 서비스 이름)
+            // 이 명령이 errno:0 을 반환하면 relay_ip/relay_dn 에서 실제 접속 가능한 relay 주소를 얻을 수 있음
+            {
+                String tunnelPayload = new JSONArray()
+                        .put(new JSONObject()
+                                .put("version", 1)
+                                .put("command", "request_tunnel")
+                                .put("stop_when_error", false)
+                                .put("stop_when_success", true)
+                                .put("id", "mainapp_http")
+                                .put("serverID", qcId)
+                                .put("is_gofile", false)
+                                .put("path", ""))
+                        .toString();
+                Log.d(TAG, "request_tunnel payload: " + tunnelPayload);
+
+                // global + portalControlHost + regional + urlRegional 모두 시도 (순서대로)
+                List<String> tunnelServers = new ArrayList<>();
+                tunnelServers.add("global.quickconnect.to");
+                if (portalControlHost != null && !portalControlHost.isEmpty()
+                        && !portalControlHost.equals("global.quickconnect.to"))
+                    tunnelServers.add(0, portalControlHost); // 포털 controlHost 를 첫 번째로
+                if (regional != null && !regional.isEmpty()) tunnelServers.add(regional);
+                if (urlRegional != null) tunnelServers.add(urlRegional);
+
+                for (String srv : tunnelServers) {
+                    try {
+                        String resp = httpPost("https://" + srv + "/Serv.php", tunnelPayload);
+                        Log.d(TAG, "request_tunnel ← " + srv + ": "
+                                + resp.substring(0, Math.min(500, resp.length())));
+                        collectTunnelCandidates(resp, qcId, candidates);
+                        if (!candidates.isEmpty()) {
+                            Log.d(TAG, "request_tunnel 후보: " + candidates);
+                            break;
+                        }
+                    } catch (Exception e) {
+                        Log.w(TAG, "request_tunnel(" + srv + ") 실패: " + e.getMessage());
+                    }
+                }
+
+                if (!candidates.isEmpty()) {
+                    String winner = probeBestUrl(candidates);
+                    if (winner != null) {
+                        Log.i(TAG, "request_tunnel relay 연결 성공: " + winner);
+                        return winner;
+                    }
+                    Log.w(TAG, "request_tunnel 후보 있으나 probe 실패");
+                    candidates.clear();
+                }
+            }
+
+            // Step 3e: cfgBaseUrl 의 host(예: gomji17.tw3.quickconnect.to) 를 relay 로 직접 시도
+            // 307 리다이렉트를 따라가 실제 NAS 주소를 발견할 수 있음
+            {
+                String qcHost = new URL(cfgBaseUrl).getHost(); // e.g. "gomji17.tw3.quickconnect.to"
+                String[] directRelayVariants = {
+                        "https://" + qcHost + "/https_first",
+                        "https://" + qcHost,
+                        "http://"  + qcHost + "/https_first",
+                        "http://"  + qcHost,
+                        "https://" + qcId + ".quickconnect.to/https_first",
+                        "https://" + qcId + ".quickconnect.to",
+                        "http://"  + qcId + ".quickconnect.to/https_first",
+                };
+                Log.d(TAG, "직접 relay probe 시작 (cfgBaseUrl host: " + qcHost + ")");
+                for (String rv : directRelayVariants) {
+                    if (probeUrl(rv)) {
+                        Log.i(TAG, "직접 relay 연결 성공: " + rv);
+                        return rv;
+                    }
+                    // probeUrl 이 실패한 경우 307 리다이렉트를 따라가 NAS 주소 발견 시도
+                    String redirectBase = resolveViaRedirect(rv + "/webapi/auth.cgi?api=SYNO.API.Info&version=1&method=query&query=SYNO.API.Auth");
+                    if (redirectBase != null) {
+                        Log.i(TAG, "리다이렉트 추적으로 NAS 주소 발견: " + redirectBase);
+                        return redirectBase;
+                    }
+                }
+            }
+
+            // Step 3f: mobile.quickconnect.to — DS File 과 동일한 모바일 앱 전용 엔드포인트
+            // get_server_info 와 달리 POST 불필요, GET 단순 조회
+            if (candidates.isEmpty()) {
+                String[] mobileUrls = {
+                    "https://mobile.quickconnect.to/get?id=" + qcId,
+                    "https://mobile.quickconnect.to/Serv.php?id=" + qcId,
+                };
+                for (String mu : mobileUrls) {
+                    try {
+                        String mr = httpGet(mu);
+                        Log.d(TAG, "mobile ← " + mu + ": " + mr.substring(0, Math.min(400, mr.length())));
+                        collectCandidates(mr, candidates);
+                        if (!candidates.isEmpty()) break;
+                        // mobile API 고유 필드 추가 파싱
+                        try {
+                            JSONObject mj = new JSONObject(mr);
+                            for (String field : new String[]{"service", "env", "server", "relay"}) {
+                                JSONObject fo = mj.optJSONObject(field);
+                                if (fo == null) continue;
+                                String ri = fo.optString("relay_ip", "");
+                                String rd = fo.optString("relay_dn", "");
+                                int rp = fo.optInt("relay_port", 443);
+                                if (!ri.isEmpty() && !ri.equals("NULL")) candidates.add("https://" + ri + ":" + rp);
+                                if (!rd.isEmpty() && !rd.equals("NULL")) candidates.add("https://" + rd + ":" + rp);
+                            }
+                        } catch (Exception ignored) {}
+                        if (!candidates.isEmpty()) break;
+                    } catch (Exception e) {
+                        Log.w(TAG, "mobile " + mu + " 실패: " + e.getMessage());
+                    }
+                }
+                if (!candidates.isEmpty()) {
+                    String winner = probeBestUrl(candidates);
+                    if (winner != null) {
+                        Log.i(TAG, "mobile API relay 연결 성공: " + winner);
+                        return winner;
+                    }
+                    candidates.clear();
+                }
+            }
+
+            // Step 4: https://quickconnect.to/{id} 포털 302 리다이렉트 추적
+            String portalResolved = resolvePortalRedirect(qcId);
+            if (portalResolved != null) {
+                Log.i(TAG, "포털 리다이렉트 → NAS 주소: " + portalResolved);
+                return portalResolved;
+            }
+
+            // Step 5: 최후 수단 — relay base를 강제 반환 (login 함수에서 HTML 여부 재확인)
+            // HTTPS relay URL 직접 시도 (relay가 실제로 작동 중이면 JSON 응답 기대)
+            String relayFallback = getRelayBase(qcId);
+            if (relayFallback != null) {
+                Log.w(TAG, "relay fallback 강제 사용: " + relayFallback);
+                return relayFallback;
+            }
+
             Log.w(TAG, "QuickConnect: 모든 후보 실패");
             return null;
 
@@ -461,45 +1017,319 @@ public class DsFileApiClient {
         }
     }
 
-    /** Serv.php JSON에서 후보 URL 목록 수집 (LAN IP 우선) */
+    /**
+     * DNS over HTTPS (Cloudflare 1.1.1.1 → Google 8.8.8.8 fallback) 로 호스트명 해석.
+     * 통신사 DNS가 synology.me 를 차단한 경우에도 DoH 는 포트 443 HTTPS 를 사용해 우회 가능.
+     * 성공 시 IP 문자열 반환, 실패 시 null.
+     */
+    private static String resolveDoh(String hostname) {
+        String[][] providers = {
+                { "https://1.1.1.1/dns-query?name=" + hostname + "&type=A",
+                  "application/dns-json" },
+                { "https://8.8.8.8/dns-query?name=" + hostname + "&type=A",
+                  "application/dns-json" },
+        };
+        for (String[] prov : providers) {
+            try {
+                HttpURLConnection conn = openTrustedConnection(prov[0]);
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(5000);
+                conn.setRequestMethod("GET");
+                conn.setRequestProperty("Accept", prov[1]);
+                int code = conn.getResponseCode();
+                if (code != 200) { conn.disconnect(); continue; }
+                StringBuilder sb = new StringBuilder();
+                try (BufferedReader br = new BufferedReader(
+                        new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line; while ((line = br.readLine()) != null) sb.append(line);
+                }
+                conn.disconnect();
+                String body = sb.toString();
+                Log.d(TAG, "DoH " + prov[0].substring(0, 30) + " → " + body.substring(0, Math.min(200, body.length())));
+                JSONObject json = new JSONObject(body);
+                JSONArray answers = json.optJSONArray("Answer");
+                if (answers != null) {
+                    for (int i = 0; i < answers.length(); i++) {
+                        JSONObject ans = answers.getJSONObject(i);
+                        int type = ans.optInt("type", 0);
+                        if (type == 1) { // A record
+                            String ip = ans.optString("data", "");
+                            if (!ip.isEmpty() && !ip.contains(":")) { // IPv4
+                                return ip;
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Log.d(TAG, "DoH 실패(" + prov[0].substring(0, 25) + "): " + e.getMessage());
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Serv.php POST JSON 응답에서 후보 URL 목록 수집.
+     * 외부 IP/DDNS를 LAN IP보다 앞에 추가 (외부망 우선).
+     * relay 서버 정보도 포함.
+     */
     private static void collectCandidates(String body, List<String> out) {
         try {
             JSONObject json = new JSONObject(body);
             JSONObject server = json.optJSONObject("server");
-            if (server == null) return;
+            JSONObject env    = json.optJSONObject("env");
 
-            // LAN 인터페이스 IP (같은 네트워크일 경우 가장 빠름)
-            JSONArray ifaces = server.optJSONArray("interface");
-            if (ifaces != null) {
-                for (int i = 0; i < ifaces.length(); i++) {
-                    JSONObject iface = ifaces.getJSONObject(i);
-                    String ip = iface.optString("ip", "");
+            if (server != null) {
+                // 외부 IP (포트포워딩 직접 접속) — 외부망에서 가장 신뢰할 수 있는 경로
+                JSONObject ext = server.optJSONObject("external");
+                if (ext != null) {
+                    String ip       = ext.optString("ip", "");
+                    int httpsPort   = ext.optInt("https_port", 5001);
+                    int httpPort    = ext.optInt("http_port",  5000);
                     if (!ip.isEmpty() && !ip.equals("NULL")) {
-                        out.add("http://"  + ip + ":5000");
-                        out.add("https://" + ip + ":5001");
+                        out.add("https://" + ip + ":" + httpsPort);
+                        out.add("http://"  + ip + ":" + httpPort);
+                    }
+                }
+                // DDNS
+                String ddns = server.optString("ddns", "");
+                if (!ddns.isEmpty() && !ddns.equals("NULL")) {
+                    out.add("https://" + ddns);
+                    out.add("https://" + ddns + ":5001");
+                }
+                // LAN IP (외부망에서는 타임아웃이지만 병렬 probe라 문제 없음)
+                JSONArray ifaces = server.optJSONArray("interface");
+                if (ifaces != null) {
+                    for (int i = 0; i < ifaces.length(); i++) {
+                        JSONObject iface = ifaces.getJSONObject(i);
+                        String ip = iface.optString("ip", "");
+                        if (!ip.isEmpty() && !ip.equals("NULL")) {
+                            out.add("http://"  + ip + ":5000");
+                            out.add("https://" + ip + ":5001");
+                        }
                     }
                 }
             }
-            // DDNS
-            String ddns = server.optString("ddns", "");
-            if (!ddns.isEmpty() && !ddns.equals("NULL")) {
-                out.add("https://" + ddns);
-                out.add("https://" + ddns + ":5001");
-            }
-            // 외부 IP
-            JSONObject ext = server.optJSONObject("external");
-            if (ext != null) {
-                String ip       = ext.optString("ip", "");
-                int httpsPort   = ext.optInt("https_port", 5001);
-                int httpPort    = ext.optInt("http_port",  5000);
-                if (!ip.isEmpty() && !ip.equals("NULL")) {
-                    out.add("https://" + ip + ":" + httpsPort);
-                    out.add("http://"  + ip + ":" + httpPort);
+
+            // QuickConnect relay 서버
+            if (env != null) {
+                String relayIp = env.optString("relay_ip", "");
+                String relayDn = env.optString("relay_dn", "");
+                int    relayPort = env.optInt("relay_port", 443);
+                if (!relayIp.isEmpty() && !relayIp.equals("NULL")) {
+                    out.add("https://" + relayIp + ":" + relayPort);
+                }
+                if (!relayDn.isEmpty() && !relayDn.equals("NULL")) {
+                    out.add("https://" + relayDn + ":" + relayPort);
                 }
             }
         } catch (Exception e) {
             Log.d(TAG, "collectCandidates: " + e.getMessage());
         }
+    }
+
+    /**
+     * request_tunnel 응답에서 relay 후보 URL 추출.
+     * 응답이 JSON 배열인 경우도 처리하고, service/env/server 필드에서 relay 정보 수집.
+     */
+    private static void collectTunnelCandidates(String body, String qcId, List<String> out) {
+        try {
+            JSONObject json;
+            String trimmed = body.trim();
+            if (trimmed.startsWith("[")) {
+                JSONArray arr = new JSONArray(trimmed);
+                if (arr.length() == 0) return;
+                json = arr.getJSONObject(0);
+            } else if (trimmed.startsWith("{")) {
+                json = new JSONObject(trimmed);
+            } else {
+                Log.d(TAG, "request_tunnel 응답이 JSON 아님: "
+                        + trimmed.substring(0, Math.min(120, trimmed.length())));
+                return;
+            }
+
+            int errno = json.optInt("errno", -1);
+            Log.d(TAG, "request_tunnel errno=" + errno);
+            if (errno != 0) return;
+
+            // service / env / server 필드 모두 검색
+            for (String field : new String[]{"service", "env", "server"}) {
+                JSONObject obj = json.optJSONObject(field);
+                if (obj == null) continue;
+                String relayIp   = obj.optString("relay_ip",   "");
+                String relayDn   = obj.optString("relay_dn",   "");
+                int    relayPort = obj.optInt("relay_port", 443);
+                String relayPath = obj.optString("relay_path", "");
+                if (!relayIp.isEmpty() && !relayIp.equals("NULL")) {
+                    String base = "https://" + relayIp + ":" + relayPort;
+                    if (!relayPath.isEmpty()) base += relayPath;
+                    Log.d(TAG, "tunnel candidate relay_ip(" + field + "): " + base);
+                    out.add(base);
+                }
+                if (!relayDn.isEmpty() && !relayDn.equals("NULL")) {
+                    String base = "https://" + relayDn + ":" + relayPort;
+                    if (!relayPath.isEmpty()) base += relayPath;
+                    Log.d(TAG, "tunnel candidate relay_dn(" + field + "): " + base);
+                    out.add(base);
+                }
+            }
+            // 표준 server/external 경로도 시도 (get_server_info 와 동일 형식일 수 있음)
+            collectCandidates(body, out);
+        } catch (Exception e) {
+            Log.d(TAG, "collectTunnelCandidates: " + e.getMessage());
+        }
+    }
+
+    /** resolvePortalRedirect 에서 발견한 HTTP 200 relay base (마지막 수단용) */
+    private static volatile String lastRelayBase = null;
+
+    private static String getRelayBase(String qcId) {
+        if (lastRelayBase != null) return lastRelayBase;
+        // HTTPS relay URL — relay가 활성 상태면 /webapi/ 요청을 NAS로 프록시해줌
+        return "https://" + qcId + ".quickconnect.to";
+    }
+
+    /**
+     * https://quickconnect.to/{id} 포털의 302 리다이렉트를 따라가 실제 NAS 주소 추출.
+     * JSON API 응답이 오면 즉시 반환. HTTP 200 HTML이면 lastRelayBase에 저장.
+     */
+    private static String resolvePortalRedirect(String qcId) {
+        lastRelayBase = null;
+        try {
+            String currentUrl = "https://quickconnect.to/" + qcId
+                    + "/webapi/auth.cgi?api=SYNO.API.Info&version=1&method=query&query=SYNO.API.Auth";
+            for (int i = 0; i < 6; i++) {
+                HttpURLConnection conn = openTrustedConnection(currentUrl);
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(5000);
+                conn.setRequestMethod("GET");
+                conn.setInstanceFollowRedirects(false);
+                int code = conn.getResponseCode();
+                String location = conn.getHeaderField("Location");
+                conn.disconnect();
+                Log.d(TAG, "portal[" + i + "] HTTP " + code + " → "
+                        + (location != null ? location.substring(0, Math.min(100, location.length())) : "null"));
+
+                if (code >= 300 && code < 400 && location != null) {
+                    URL loc = new URL(location);
+                    String locHost = loc.getHost();
+
+                    // LAN IP가 아닌 외부 주소 발견 → 실제 NAS
+                    if (!locHost.contains("quickconnect.to")
+                            && !locHost.startsWith("192.168.")
+                            && !locHost.startsWith("10.")
+                            && !locHost.startsWith("172.")) {
+                        int port = loc.getPort();
+                        String extBase = loc.getProtocol() + "://" + locHost + (port > 0 ? ":" + port : "");
+                        Log.d(TAG, "portal → 외부 NAS 주소 발견: " + extBase);
+                        if (probeUrl(extBase)) return extBase;
+                        return extBase; // probe 실패해도 반환
+                    }
+
+                    // quickconnect.to 계열 → /webapi/ 앞까지 path prefix 포함해서 base 추출
+                    int webApiIdx = location.indexOf("/webapi/");
+                    String newBase;
+                    if (webApiIdx > 0) {
+                        newBase = location.substring(0, webApiIdx);
+                    } else {
+                        int port = loc.getPort();
+                        newBase = loc.getProtocol() + "://" + locHost + (port > 0 ? ":" + port : "");
+                    }
+                    Log.d(TAG, "portal relay base: " + newBase);
+
+                    if (probeUrl(newBase)) {
+                        Log.d(TAG, "portal relay probe JSON 성공: " + newBase);
+                        return newBase;
+                    }
+                    // HTTP 200 이지만 HTML — relay 후보로 저장, 계속 탐색
+                    lastRelayBase = newBase;
+                    currentUrl = newBase
+                            + "/webapi/auth.cgi?api=SYNO.API.Info&version=1&method=query&query=SYNO.API.Auth";
+                    continue;
+                }
+                if (code == 200) {
+                    String base = extractBase(currentUrl);
+                    if (probeUrl(base)) return base;
+                    lastRelayBase = base;
+                }
+                break;
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "portal redirect 추적 실패: " + e.getMessage());
+        }
+        return null;
+    }
+
+    /** URL에서 scheme://host:port 부분만 추출 */
+    private static String extractBase(String urlStr) {
+        try {
+            URL u = new URL(urlStr);
+            return u.getProtocol() + "://" + u.getHost() + (u.getPort() > 0 ? ":" + u.getPort() : "");
+        } catch (Exception e) {
+            return urlStr;
+        }
+    }
+
+    /**
+     * 리다이렉트(307 등)를 따라가 최종적으로 DSM API JSON 을 반환하는 base URL 을 반환.
+     * tw3.quickconnect.to 같이 307 으로 실제 NAS 주소를 알려주는 서버용.
+     * LAN IP 나 quickconnect.to 내부로의 리다이렉트는 무시하고 외부 NAS 주소만 반환.
+     */
+    private static String resolveViaRedirect(String probeUrl) {
+        try {
+            String current = probeUrl;
+            for (int i = 0; i < 6; i++) {
+                HttpURLConnection conn = openTrustedConnection(current);
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(5000);
+                conn.setRequestMethod("GET");
+                conn.setInstanceFollowRedirects(false);
+                int code = conn.getResponseCode();
+                String location = conn.getHeaderField("Location");
+                conn.disconnect();
+                Log.d(TAG, "resolveViaRedirect[" + i + "] HTTP " + code + " ← " + current
+                        + (location != null ? " → " + location.substring(0, Math.min(100, location.length())) : ""));
+
+                if (code >= 300 && code < 400 && location != null) {
+                    if (!location.startsWith("http")) {
+                        URL base = new URL(current);
+                        location = base.getProtocol() + "://" + base.getHost()
+                                + (base.getPort() > 0 ? ":" + base.getPort() : "") + location;
+                    }
+                    URL loc = new URL(location);
+                    String locHost = loc.getHost();
+                    // 외부 NAS 주소(LAN·quickconnect 제외)로 리다이렉트된 경우
+                    if (!locHost.contains("quickconnect.to")
+                            && !locHost.startsWith("192.168.")
+                            && !locHost.startsWith("10.")
+                            && !locHost.startsWith("172.")) {
+                        int port = loc.getPort();
+                        String extBase = loc.getProtocol() + "://" + locHost + (port > 0 ? ":" + port : "");
+                        Log.d(TAG, "resolveViaRedirect → 외부 NAS 주소: " + extBase);
+                        if (probeUrl(extBase)) return extBase;
+                        return extBase; // probe 실패해도 외부 주소이면 반환
+                    }
+                    current = location;
+                    continue;
+                }
+                if (code == 200) {
+                    // /https_first 등 relay path prefix 포함해서 base 추출
+                    // e.g. http://gomji17.quickconnect.to/https_first/webapi/... → http://gomji17.quickconnect.to/https_first
+                    int webApiIdx = current.indexOf("/webapi/");
+                    String base = webApiIdx > 0 ? current.substring(0, webApiIdx) : extractBase(current);
+                    Log.d(TAG, "resolveViaRedirect HTTP200 base=" + base);
+                    if (probeUrl(base)) return base;
+                    // path prefix 가 있는 경우 probe 실패해도 relay URL 로 반환 (login 에서 재검증)
+                    if (webApiIdx > 0) {
+                        Log.d(TAG, "resolveViaRedirect relay path prefix URL 반환: " + base);
+                        return base;
+                    }
+                }
+                break;
+            }
+        } catch (Exception e) {
+            Log.d(TAG, "resolveViaRedirect fail: " + e.getMessage());
+        }
+        return null;
     }
 
     /** URL이 실제로 DSM API를 서비스하는지 빠르게 확인 (3초 타임아웃) */
@@ -530,6 +1360,44 @@ public class DsFileApiClient {
         return false;
     }
 
+    /**
+     * 후보 URL 목록을 병렬로 probe — 가장 먼저 응답하는 URL 반환.
+     * LAN/외부 혼합 상황에서 LAN IP 타임아웃을 기다리지 않고 외부 URL이 먼저 응답하면 바로 사용.
+     * 최대 대기 시간 = probe 타임아웃(3초) + 여유 1초.
+     */
+    private static String probeBestUrl(List<String> candidates) {
+        if (candidates.isEmpty()) return null;
+
+        CountDownLatch done = new CountDownLatch(1);
+        AtomicReference<String> winner = new AtomicReference<>(null);
+        CountDownLatch allFinished = new CountDownLatch(candidates.size());
+
+        for (String url : candidates) {
+            Thread t = new Thread(() -> {
+                try {
+                    if (winner.get() == null && probeUrl(url)) {
+                        if (winner.compareAndSet(null, url)) {
+                            done.countDown(); // 첫 번째 성공 → 즉시 반환 트리거
+                        }
+                    }
+                } finally {
+                    allFinished.countDown();
+                }
+            });
+            t.setDaemon(true);
+            t.start();
+        }
+
+        try {
+            // 첫 성공 또는 전체 완료까지 최대 4초 대기
+            done.await(4, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
+        return winner.get();
+    }
+
     /** JSON body POST (Content-Type: application/json) */
     private static String httpPost(String urlStr, String jsonBody) throws Exception {
         HttpURLConnection conn = openTrustedConnection(urlStr);
@@ -538,6 +1406,8 @@ public class DsFileApiClient {
         conn.setRequestMethod("POST");
         conn.setDoOutput(true);
         conn.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
+        conn.setRequestProperty("User-Agent", BROWSER_UA);
+        conn.setRequestProperty("Accept", "application/json, text/plain, */*");
         conn.setInstanceFollowRedirects(false);
 
         byte[] bodyBytes = jsonBody.getBytes(StandardCharsets.UTF_8);

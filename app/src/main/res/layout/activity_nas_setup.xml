@@ -42,7 +42,7 @@
             android:id="@+id/etBaseUrl"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="https://xxxx.quickconnect.to"
+            android:hint="https://quickconnect.to/xxxx 또는 https://xxxx.quickconnect.to"
             android:inputType="textUri"
             android:textColor="#FFFFFF"
             android:textColorHint="#666666"

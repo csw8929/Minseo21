@@ -53,7 +53,7 @@ public class NasSetupActivity extends AppCompatActivity {
         etBaseUrl.setText(credStore.getBaseUrl());
         etLanUrl.setText(credStore.getLanUrl());
 
-        // 편집 모드: 계정 정보도 채우기 (비밀번호 제외)
+        // 계정 정보: 저장된 값 있으면 표시, 없으면 DsFileConfig 기본값 표시
         boolean editMode = getIntent().getBooleanExtra(EXTRA_EDIT_MODE, false);
         if (editMode && credStore.hasCredentials()) {
             etUser.setText(credStore.getUser());
@@ -64,6 +64,10 @@ public class NasSetupActivity extends AppCompatActivity {
             // 이미 검증된 설정 — 저장 버튼 바로 활성화
             btnSave.setEnabled(true);
             btnSave.setAlpha(1.0f);
+        } else if (!DsFileConfig.USER.isEmpty()) {
+            // 저장된 계정 없고 DsFileConfig 기본값 있으면 미리 채우기 (테스트 편의)
+            etUser.setText(DsFileConfig.USER);
+            etPass.setText(DsFileConfig.PASS);
         }
 
         // 비밀번호 표시/숨기기 토글
