@@ -5,7 +5,7 @@ Updated 2026-04-10 (eng-review fixes + basePath/posDir UI).
 
 ---
 
-## P2 — Video quality tuning
+## ✅ P2 — Video quality tuning (DONE 2026-04-10)
 
 **What:** Tune libVLC decoder and renderer options in `initPlayer()` for better video quality.
 
@@ -26,7 +26,7 @@ Updated 2026-04-10 (eng-review fixes + basePath/posDir UI).
 
 ---
 
-## P2 — NAS subtitle auto-load (srt/smi/ass/ssa)
+## ✅ P2 — NAS subtitle auto-load (srt/smi/ass/ssa) (DONE 2026-04-10)
 
 **What:** When opening a NAS video, automatically detect and load subtitle files stored alongside the video on the NAS.
 
@@ -49,7 +49,7 @@ Updated 2026-04-10 (eng-review fixes + basePath/posDir UI).
 
 ---
 
-## P3 — Null-guard for currentDbKey in saveCurrentPosition
+## ✅ P3 — Null-guard for currentDbKey in saveCurrentPosition (DONE 2026-04-10)
 
 **What:** Add `if (currentDbKey == null) return;` at the top of `saveCurrentPosition()`.
 

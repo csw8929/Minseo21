@@ -240,8 +240,8 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
 
         ArrayList<String> options = new ArrayList<>();
         options.add("--codec=mediacodec_ndk,mediacodec_jni,none");
-        options.add("--android-display-chroma=RV16");
-        options.add("--deinterlace=0");
+        options.add("--android-display-chroma=RV32"); // RV16→RV32: 16bit→32bit 컬러 (화질 개선)
+        options.add("--deinterlace=-1");              // 0(off)→-1(auto): 인터레이스 영상 자동 감지
         options.add("--aout=opensles");
         options.add("--network-caching=5000");
         options.add("--file-caching=1000");
@@ -281,7 +281,16 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     }
 
     private void tryAddExternalSubtitles(Uri videoUri) {
-        if (!"content".equals(videoUri.getScheme())) return;
+        String scheme = videoUri.getScheme();
+
+        // ── NAS 스트림: PlaylistHolder에서 nasPath 추출 후 비동기 자막 탐색 ──
+        if ("http".equals(scheme) || "https".equals(scheme)) {
+            tryAddNasSubtitles();
+            return;
+        }
+
+        // ── 로컬 content:// ──
+        if (!"content".equals(scheme)) return;
 
         String videoPath = null;
         String videoName = null;
@@ -317,6 +326,52 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             }
         }
         if (!found) Log.d(TAG, "[Sub] No matching external subtitles found.");
+    }
+
+    /**
+     * NAS 재생 시 같은 폴더의 자막 파일 자동 탐색.
+     * PlaylistHolder에서 현재 항목의 nasPath를 읽어 폴더를 listFolder.
+     */
+    private void tryAddNasSubtitles() {
+        if (PlaylistHolder.playlist == null
+                || PlaylistHolder.currentIndex < 0
+                || PlaylistHolder.currentIndex >= PlaylistHolder.playlist.size()) return;
+
+        VideoItem current = PlaylistHolder.playlist.get(PlaylistHolder.currentIndex);
+        String nasPath = current.nasPath;
+        if (nasPath == null || nasPath.isEmpty()) return;
+
+        String sid = DsFileApiClient.getCachedSid();
+        if (sid == null) { Log.d(TAG, "[Sub] NAS SID 없음, 자막 탐색 스킵"); return; }
+
+        String nasFolder = nasPath.contains("/")
+                ? nasPath.substring(0, nasPath.lastIndexOf('/'))
+                : nasPath;
+        String videoName = current.name != null ? current.name : "";
+        int lastDot = videoName.lastIndexOf('.');
+        String baseName = (lastDot > 0) ? videoName.substring(0, lastDot) : videoName;
+        String[] subExts = {".smi", ".srt", ".SMI", ".SRT", ".ass", ".ssa"};
+
+        Log.d(TAG, "[Sub] NAS 자막 탐색: 폴더=" + nasFolder + ", 기준파일=" + baseName);
+        DsFileApiClient.listFolder(nasFolder, sid, new DsFileApiClient.Callback<List<VideoItem>>() {
+            @Override public void onResult(List<VideoItem> items) {
+                if (isFinishing() || isDestroyed() || mediaPlayer == null) return;
+                for (VideoItem item : items) {
+                    if (item.type == VideoItem.TYPE_FOLDER || item.name == null) continue;
+                    for (String ext : subExts) {
+                        if (item.name.equalsIgnoreCase(baseName + ext) && item.nasPath != null) {
+                            String subUrl = DsFileApiClient.getStreamUrl(item.nasPath, sid);
+                            boolean ok = mediaPlayer.addSlave(
+                                    IMedia.Slave.Type.Subtitle, Uri.parse(subUrl), true);
+                            Log.i(TAG, "[Sub] NAS 자막 " + (ok ? "추가됨" : "실패") + ": " + item.name);
+                        }
+                    }
+                }
+            }
+            @Override public void onError(String msg) {
+                Log.d(TAG, "[Sub] NAS 자막 탐색 실패 (무시): " + msg);
+            }
+        });
     }
 
     private void loadSavedPosition(String uriKey) {
@@ -362,10 +417,11 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
 
     private void saveCurrentPosition() {
         if (mediaPlayer == null || currentUriKey == null) return;
+        if (currentDbKey == null) return; // canonical 키 없으면 null 행 저장 방지
         long pos = mediaPlayer.getTime();
         if (pos <= 0) return;
         PlaybackPosition pp = new PlaybackPosition();
-        pp.uri        = currentDbKey != null ? currentDbKey : currentUriKey;
+        pp.uri        = currentDbKey;
         pp.name       = currentTitle;
         pp.bucketId   = currentBucketId;
         pp.positionMs = pos;

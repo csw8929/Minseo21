@@ -59,6 +59,9 @@ public class NasSetupActivity extends AppCompatActivity {
             // 경로: 커스텀 값이 있으면 표시, 없으면 빈칸 (hint에 기본값 표시)
             etBasePath.setText(credStore.getCustomBasePath());
             etPosDir.setText(credStore.getCustomPosDir());
+            // 이미 검증된 설정 — 저장 버튼 바로 활성화
+            btnSave.setEnabled(true);
+            btnSave.setAlpha(1.0f);
         }
 
         // 비밀번호 표시/숨기기 토글
