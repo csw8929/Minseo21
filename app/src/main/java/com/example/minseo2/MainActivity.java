@@ -277,10 +277,11 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             return;
         }
         
-        tryAddExternalSubtitles(videoUri);
-
+        // setMedia() must come before tryAddExternalSubtitles() so that
+        // mediaPlayer.addSlave() has a media object to attach to
         mediaPlayer.setMedia(media);
         media.release();
+        tryAddExternalSubtitles(videoUri);
         mediaPlayer.play();
     }
 
@@ -296,40 +297,100 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         // ── 로컬 content:// ──
         if (!"content".equals(scheme)) return;
 
+        // Fast single-row query on main thread to get metadata
         String videoPath = null;
         String videoName = null;
-        String[] proj = {MediaStore.Video.Media.DATA, MediaStore.Video.Media.DISPLAY_NAME};
+        boolean bucketIdFound = false;
+        long bucketId = -1;
+        String[] proj = {
+            MediaStore.Video.Media.DATA,
+            MediaStore.Video.Media.DISPLAY_NAME,
+            MediaStore.Video.Media.BUCKET_ID
+        };
         try (Cursor cursor = getContentResolver().query(videoUri, proj, null, null, null)) {
             if (cursor != null && cursor.moveToFirst()) {
                 videoPath = cursor.getString(0);
                 videoName = cursor.getString(1);
+                bucketId = cursor.getLong(2);
+                bucketIdFound = true;
             }
         } catch (Exception e) {
-            Log.e(TAG, "failed to get video path", e);
+            Log.e(TAG, "[Sub] failed to get video path", e);
         }
 
-        if (videoPath == null || videoName == null) return;
+        if (videoName == null) return;
 
+        final String finalBaseName;
         int lastDot = videoName.lastIndexOf('.');
-        String baseName = (lastDot > 0) ? videoName.substring(0, lastDot) : videoName;
-        String folderPath = videoPath.substring(0, videoPath.lastIndexOf('/') + 1);
+        finalBaseName = (lastDot > 0) ? videoName.substring(0, lastDot) : videoName;
+        final String finalVideoPath = videoPath;
+        final long finalBucketId = bucketId;
+        final boolean finalBucketIdFound = bucketIdFound;
 
-        String[] subExts = {".smi", ".srt", ".SMI", ".SRT", ".ass", ".ssa"};
-        boolean found = false;
-        for (String ext : subExts) {
-            java.io.File subFile = new java.io.File(folderPath + baseName + ext);
-            if (subFile.exists()) {
-                Log.d(TAG, "[Sub] Found external subtitle: " + subFile.getAbsolutePath());
-                boolean success = mediaPlayer.addSlave(IMedia.Slave.Type.Subtitle, Uri.fromFile(subFile), true);
-                if (success) {
-                    Log.i(TAG, "[Sub] Successfully added and selected: " + subFile.getName());
-                    found = true;
-                } else {
-                    Log.e(TAG, "[Sub] Failed to add subtitle: " + subFile.getName());
+        // Bucket scan can be slow on large folders — run off the main thread
+        dbExecutor.execute(() -> {
+            java.util.Set<String> subExtSet = new java.util.HashSet<>(
+                    java.util.Arrays.asList(".smi", ".srt", ".ass", ".ssa"));
+            boolean found = false;
+
+            // Android 10+ fix: File.exists() is unreliable on external storage.
+            // Use ContentResolver to scan same MediaStore bucket instead.
+            if (finalBucketIdFound) {
+                android.net.Uri filesUri = android.provider.MediaStore.Files.getContentUri("external");
+                String[] fileProj = {
+                    android.provider.MediaStore.Files.FileColumns._ID,
+                    android.provider.MediaStore.Files.FileColumns.DISPLAY_NAME
+                };
+                String sel = android.provider.MediaStore.Files.FileColumns.BUCKET_ID + "=?";
+                try (Cursor fc = getContentResolver().query(
+                        filesUri, fileProj, sel, new String[]{String.valueOf(finalBucketId)}, null)) {
+                    while (fc != null && fc.moveToNext()) {
+                        String name = fc.getString(1);
+                        if (name == null) continue;
+                        int dot = name.lastIndexOf('.');
+                        String fBase = (dot > 0) ? name.substring(0, dot) : name;
+                        String fExt  = (dot > 0) ? name.substring(dot).toLowerCase(java.util.Locale.ROOT) : "";
+                        if (fBase.equalsIgnoreCase(finalBaseName) && subExtSet.contains(fExt)) {
+                            long id = fc.getLong(0);
+                            android.net.Uri subUri = android.net.Uri.withAppendedPath(filesUri, String.valueOf(id));
+                            final String subName = name;
+                            runOnUiThread(() -> {
+                                if (isFinishing() || isDestroyed() || mediaPlayer == null) return;
+                                boolean ok = mediaPlayer.addSlave(IMedia.Slave.Type.Subtitle, subUri, true);
+                                Log.i(TAG, "[Sub] ContentResolver " + (ok ? "추가됨" : "실패") + ": " + subName);
+                            });
+                            found = true;
+                        }
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "[Sub] ContentResolver 자막 탐색 실패", e);
                 }
             }
-        }
-        if (!found) Log.d(TAG, "[Sub] No matching external subtitles found.");
+
+            // Fallback: direct file path (Android 9 이하, 또는 내부 저장소)
+            if (!found && finalVideoPath != null) {
+                int lastSlash = finalVideoPath.lastIndexOf('/');
+                if (lastSlash >= 0) {
+                    String folderPath = finalVideoPath.substring(0, lastSlash + 1);
+                    String[] subExts = {".smi", ".srt", ".SMI", ".SRT", ".ass", ".ssa"};
+                    for (String ext : subExts) {
+                        java.io.File subFile = new java.io.File(folderPath + finalBaseName + ext);
+                        if (subFile.exists()) {
+                            final Uri subUri = Uri.fromFile(subFile);
+                            final String subName = subFile.getName();
+                            runOnUiThread(() -> {
+                                if (isFinishing() || isDestroyed() || mediaPlayer == null) return;
+                                boolean ok = mediaPlayer.addSlave(IMedia.Slave.Type.Subtitle, subUri, true);
+                                Log.i(TAG, "[Sub] File.exists " + (ok ? "추가됨" : "실패") + ": " + subName);
+                            });
+                            found = true;
+                        }
+                    }
+                }
+            }
+
+            if (!found) Log.d(TAG, "[Sub] No matching external subtitles found for: " + finalBaseName);
+        });
     }
 
     /**
@@ -644,9 +705,9 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
 
         Media media = openMedia(item.uri);
         if (media != null) {
-            tryAddExternalSubtitles(item.uri);
             mediaPlayer.setMedia(media);
             media.release();
+            tryAddExternalSubtitles(item.uri);
             mediaPlayer.play();
         }
     }
