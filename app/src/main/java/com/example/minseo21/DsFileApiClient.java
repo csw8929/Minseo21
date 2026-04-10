@@ -577,43 +577,9 @@ public class DsFileApiClient {
                 Log.d(TAG, "LAN_URL probe 실패, QuickConnect 시도");
             }
 
-            // Step 0a: Synology direct.quickconnect.to 릴레이 (DS File 이 실제로 사용하는 경로)
-            // 형식: http://synr-{region}.{QCID-upper}.direct.quickconnect.to:{port}
-            // cfgBaseUrl 호스트에서 리전 추출 (예: gomji17.tw3.quickconnect.to → tw3)
-            {
-                String qcIdUpper = qcId.toUpperCase();
-                // URL 에서 리전 추출
-                String[] hp = host.split("\\.");
-                // hp = ["gomji17", "tw3", "quickconnect", "to"] → region = hp[1] if length>=4
-                String region = (hp.length >= 4) ? hp[1] : null;
-
-                // 시도할 릴레이 포트 (Synology 릴레이는 16811, 6690, 443, 80 등 사용)
-                int[] relayPorts = {16811, 16812, 6690, 443, 80};
-
-                List<String> directCandidates = new ArrayList<>();
-                if (region != null) {
-                    for (int rp : relayPorts) {
-                        directCandidates.add("http://synr-" + region + "." + qcIdUpper + ".direct.quickconnect.to:" + rp);
-                        directCandidates.add("https://synr-" + region + "." + qcIdUpper + ".direct.quickconnect.to:" + rp);
-                    }
-                }
-                // 리전 없이도 시도
-                for (int rp : relayPorts) {
-                    directCandidates.add("http://synr." + qcIdUpper + ".direct.quickconnect.to:" + rp);
-                    directCandidates.add("http://" + qcIdUpper + ".direct.quickconnect.to:" + rp);
-                }
-                Log.d(TAG, "direct.quickconnect.to relay probe 시작 (region=" + region + "): "
-                        + directCandidates.subList(0, Math.min(4, directCandidates.size())));
-                String winner = probeBestUrl(directCandidates);
-                if (winner != null) {
-                    Log.i(TAG, "direct.quickconnect.to relay 연결 성공: " + winner);
-                    return winner;
-                }
-                Log.d(TAG, "direct.quickconnect.to relay probe 실패, 다음 단계 시도");
-            }
-
-            // Step 0b: DDNS / 외부 IP 직접 probe (QuickConnect 우회 — 포트포워딩 환경)
+            // Step 0a: DDNS / 외부 IP 직접 probe — 릴레이보다 먼저 시도 (포트포워딩 환경에서 릴레이 우회)
             // Synology DDNS (xxx.synology.me) 와 공인 IP 를 사용하면 릴레이 없이 직접 접속 가능
+            // → 릴레이 대역폭 제한(~1 Mbps) 없이 NAS 업로드 속도 전체 사용
             {
                 List<String> directCandidates = new ArrayList<>();
                 // DsFileConfig 에 설정된 DDNS/외부 IP — DSM 기본 포트 + 표준 웹 포트
@@ -650,11 +616,46 @@ public class DsFileApiClient {
                     Log.d(TAG, "DDNS/외부 IP 직접 probe 시작: " + directCandidates);
                     String winner = probeBestUrl(directCandidates);
                     if (winner != null) {
-                        Log.i(TAG, "DDNS/외부 IP 직접 연결 성공: " + winner);
+                        Log.i(TAG, "DDNS/외부 IP 직접 연결 성공 (릴레이 우회): " + winner);
                         return winner;
                     }
-                    Log.d(TAG, "DDNS/외부 IP probe 실패, QuickConnect relay 시도");
+                    Log.d(TAG, "DDNS/외부 IP probe 실패, 릴레이 시도");
                 }
+            }
+
+            // Step 0b: Synology direct.quickconnect.to 릴레이 (DDNS 실패 시 폴백)
+            // 형식: http://synr-{region}.{QCID-upper}.direct.quickconnect.to:{port}
+            // cfgBaseUrl 호스트에서 리전 추출 (예: gomji17.tw3.quickconnect.to → tw3)
+            {
+                String qcIdUpper = qcId.toUpperCase();
+                // URL 에서 리전 추출
+                String[] hp = host.split("\\.");
+                // hp = ["gomji17", "tw3", "quickconnect", "to"] → region = hp[1] if length>=4
+                String region = (hp.length >= 4) ? hp[1] : null;
+
+                // 시도할 릴레이 포트 (Synology 릴레이는 16811, 6690, 443, 80 등 사용)
+                int[] relayPorts = {16811, 16812, 6690, 443, 80};
+
+                List<String> directCandidates = new ArrayList<>();
+                if (region != null) {
+                    for (int rp : relayPorts) {
+                        directCandidates.add("http://synr-" + region + "." + qcIdUpper + ".direct.quickconnect.to:" + rp);
+                        directCandidates.add("https://synr-" + region + "." + qcIdUpper + ".direct.quickconnect.to:" + rp);
+                    }
+                }
+                // 리전 없이도 시도
+                for (int rp : relayPorts) {
+                    directCandidates.add("http://synr." + qcIdUpper + ".direct.quickconnect.to:" + rp);
+                    directCandidates.add("http://" + qcIdUpper + ".direct.quickconnect.to:" + rp);
+                }
+                Log.d(TAG, "direct.quickconnect.to relay probe 시작 (region=" + region + "): "
+                        + directCandidates.subList(0, Math.min(4, directCandidates.size())));
+                String winner = probeBestUrl(directCandidates);
+                if (winner != null) {
+                    Log.i(TAG, "direct.quickconnect.to relay 연결 성공: " + winner);
+                    return winner;
+                }
+                Log.d(TAG, "direct.quickconnect.to relay probe 실패, 다음 단계 시도");
             }
 
             String payload = new JSONObject()

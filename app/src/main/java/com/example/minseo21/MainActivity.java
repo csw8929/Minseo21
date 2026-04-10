@@ -70,6 +70,9 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     private long pendingSeekMs       = -1;
     private int  pendingSubtitleId   = Integer.MIN_VALUE;
     private int  pendingAudioId      = Integer.MIN_VALUE;
+    /** 버퍼링 시작 시각 (System.currentTimeMillis). 0 = 버퍼링 중 아님 */
+    private long bufferingStartMs    = 0;
+    private int  bufferingCount      = 0;
     private int  subtitleMargin      = 0;
     private int  currentSubtitleTrackId  = Integer.MIN_VALUE;
     private int  currentAudioTrackId     = Integer.MIN_VALUE;
@@ -589,9 +592,31 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             case MediaPlayer.Event.Opening:
                 loadingBar.setVisibility(View.VISIBLE);
                 break;
-            case MediaPlayer.Event.Buffering:
-                loadingBar.setVisibility(event.getBuffering() < 100f ? View.VISIBLE : View.GONE);
+            case MediaPlayer.Event.Buffering: {
+                float pct = event.getBuffering();
+                long posMs = (mediaPlayer != null) ? mediaPlayer.getTime() : -1;
+                if (pct < 100f) {
+                    loadingBar.setVisibility(View.VISIBLE);
+                    if (bufferingStartMs == 0) {
+                        bufferingStartMs = System.currentTimeMillis();
+                        bufferingCount++;
+                        Log.w(TAG, "[버퍼링 시작 #" + bufferingCount + "] pos=" + posMs + "ms  pct=" + (int)pct + "%");
+                    } else {
+                        // 진행 중 — 10% 단위로만 로그 (스팸 방지)
+                        if ((int)pct % 10 == 0) {
+                            Log.d(TAG, "[버퍼링 중 #" + bufferingCount + "] " + (int)pct + "%  pos=" + posMs + "ms");
+                        }
+                    }
+                } else {
+                    loadingBar.setVisibility(View.GONE);
+                    if (bufferingStartMs > 0) {
+                        long stalledMs = System.currentTimeMillis() - bufferingStartMs;
+                        Log.w(TAG, "[버퍼링 완료 #" + bufferingCount + "] " + stalledMs + "ms 멈춤  pos=" + posMs + "ms");
+                        bufferingStartMs = 0;
+                    }
+                }
                 break;
+            }
             case MediaPlayer.Event.Playing:
                 loadingBar.setVisibility(View.GONE);
                 btnPlayPause.setImageResource(android.R.drawable.ic_media_pause);
