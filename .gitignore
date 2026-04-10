@@ -15,3 +15,5 @@
 local.properties
 .claude/
 *.png
+# NAS 접속 정보 — 절대 커밋하지 말 것
+app/src/main/java/com/example/minseo2/DsFileConfig.java

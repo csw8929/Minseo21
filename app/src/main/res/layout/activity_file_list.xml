@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
@@ -32,7 +33,30 @@
             android:textSize="13sp"
             android:ellipsize="start"
             android:singleLine="true" />
+
+        <!-- NAS 설정 버튼 (NAS 탭일 때만 표시) -->
+        <ImageButton
+            android:id="@+id/btnNasSettings"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:src="@android:drawable/ic_menu_preferences"
+            android:tint="#888888"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="NAS 설정"
+            android:visibility="gone" />
     </LinearLayout>
+
+    <!-- 로컬 / NAS 탭 -->
+    <com.google.android.material.tabs.TabLayout
+        android:id="@+id/tabLayout"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:background="#242424"
+        app:tabTextColor="#888888"
+        app:tabSelectedTextColor="#FFFFFF"
+        app:tabIndicatorColor="#4A90D9"
+        app:tabIndicatorHeight="3dp"
+        app:tabTextAppearance="@android:style/TextAppearance.Widget.TabWidget" />
 
     <!-- 구분선 -->
     <View
@@ -40,12 +64,13 @@
         android:layout_height="1dp"
         android:background="#3A3A3A" />
 
-    <!-- 파일 목록 / 빈 화면 (FrameLayout으로 겹침) -->
+    <!-- 콘텐츠 영역 -->
     <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1">
 
+        <!-- 로컬 파일 목록 -->
         <androidx.recyclerview.widget.RecyclerView
             android:id="@+id/recyclerView"
             android:layout_width="match_parent"
@@ -53,6 +78,7 @@
             android:clipToPadding="false"
             android:paddingBottom="8dp" />
 
+        <!-- 로컬 빈 화면 -->
         <TextView
             android:id="@+id/tvEmpty"
             android:layout_width="wrap_content"
@@ -61,6 +87,67 @@
             android:textColor="#888888"
             android:textSize="15sp"
             android:visibility="gone" />
+
+        <!-- NAS 파일 목록 -->
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rvNas"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:paddingBottom="8dp"
+            android:visibility="gone" />
+
+        <!-- NAS 로딩 스피너 -->
+        <LinearLayout
+            android:id="@+id/nasLoadingView"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:visibility="gone">
+
+            <ProgressBar
+                android:layout_width="48dp"
+                android:layout_height="48dp" />
+
+            <TextView
+                android:id="@+id/tvNasLoading"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:text="NAS 연결 중…"
+                android:textColor="#AAAAAA"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <!-- NAS 에러 상태 -->
+        <LinearLayout
+            android:id="@+id/nasErrorView"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/tvNasError"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="#FF6B6B"
+                android:textSize="14sp"
+                android:gravity="center" />
+
+            <Button
+                android:id="@+id/btnNasRetry"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="재시도"
+                android:backgroundTint="#4A90D9"
+                android:textColor="#FFFFFF" />
+        </LinearLayout>
 
     </FrameLayout>
 

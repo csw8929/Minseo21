@@ -206,6 +206,13 @@
                 <data android:scheme="file" android:mimeType="*/*" android:pathPattern=".*\\.flv" />
             </intent-filter>
         </activity>
+
+        <!-- NAS 설정 화면 -->
+        <activity
+            android:name=".NasSetupActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
     </application>
 
 </manifest>

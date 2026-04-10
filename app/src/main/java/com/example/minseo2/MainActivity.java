@@ -56,11 +56,15 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     private boolean rotationLocked = false;
 
     private String currentUriKey = null;
+    /** Room DB / NAS 위치 파일 키. NAS 파일은 canonical URL, 로컬은 currentUriKey 와 동일. */
+    private String currentDbKey  = null;
     private String currentTitle = null;
     private String currentBucketId = null; // 현재 폴더 ID
     private static final String PREFS_NAME    = "player_prefs";
     private static final String KEY_SCREEN_MODE = "screen_mode";
     private static final String KEY_LAST_STATE = "last_app_state";
+
+    private NasSyncManager nasSyncManager;
 
     private long pendingSeekMs       = -1;
     private int  pendingSubtitleId   = Integer.MIN_VALUE;
@@ -138,6 +142,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        nasSyncManager = new NasSyncManager(this, dbExecutor);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         WindowInsetsControllerCompat insetsCtrl =
@@ -220,8 +225,18 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         }
     }
 
+    /** NAS 파일이면 canonical URL, 로컬이면 URI 문자열 그대로 반환 */
+    private String resolveDbKey(Uri uri) {
+        if (PlaylistHolder.playlist != null && PlaylistHolder.currentIndex >= 0) {
+            VideoItem vi = PlaylistHolder.playlist.get(PlaylistHolder.currentIndex);
+            if (vi.canonicalUri != null) return vi.canonicalUri;
+        }
+        return uri.toString();
+    }
+
     private void initPlayer(VLCVideoLayout videoLayout, Uri videoUri) {
         currentUriKey = videoUri.toString();
+        currentDbKey  = resolveDbKey(videoUri);
 
         ArrayList<String> options = new ArrayList<>();
         options.add("--codec=mediacodec_ndk,mediacodec_jni,none");
@@ -248,7 +263,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         mediaPlayer.getVLCVout().addCallback(this);
         mediaPlayer.setEventListener(event -> runOnUiThread(() -> handleVlcEvent(event)));
 
-        loadSavedPosition(currentUriKey);
+        loadSavedPosition(currentDbKey);
 
         Media media = openMedia(videoUri);
         if (media == null) {
@@ -305,6 +320,26 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     }
 
     private void loadSavedPosition(String uriKey) {
+        // NAS URI이면 NasSyncManager (NAS + Room DB 병렬, 더 최신 쪽 사용)
+        if (DsFileApiClient.isNasUrl(uriKey)) {
+            nasSyncManager.loadPosition(uriKey, pos -> {
+                // 메인 스레드에서 호출됨 (두 번 호출될 수 있음: Room DB 먼저, NAS 나중)
+                if (pos == null) return;
+                if (pos.positionMs > 0) {
+                    Log.d(TAG, "[NAS] resume at " + pos.positionMs + "ms");
+                    if (tracksLogged && mediaPlayer != null) {
+                        mediaPlayer.setTime(pos.positionMs);
+                    } else {
+                        pendingSeekMs = pos.positionMs;
+                    }
+                }
+                pendingSubtitleId = pos.subtitleTrackId;
+                pendingAudioId   = pos.audioTrackId;
+                if (tracksLogged) applyPendingSettings();
+            });
+            return;
+        }
+        // 로컬 파일: Room DB만 사용
         dbExecutor.execute(() -> {
             PlaybackPosition pos = PlaybackDatabase.getInstance(this)
                     .playbackDao().getPosition(uriKey);
@@ -330,16 +365,15 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         long pos = mediaPlayer.getTime();
         if (pos <= 0) return;
         PlaybackPosition pp = new PlaybackPosition();
-        pp.uri = currentUriKey;
-        pp.name = currentTitle;
-        pp.bucketId = currentBucketId; // 버킷 ID 저장
+        pp.uri        = currentDbKey != null ? currentDbKey : currentUriKey;
+        pp.name       = currentTitle;
+        pp.bucketId   = currentBucketId;
         pp.positionMs = pos;
-        pp.updatedAt = System.currentTimeMillis();
+        pp.updatedAt  = System.currentTimeMillis();
         pp.subtitleTrackId = currentSubtitleTrackId;
         pp.audioTrackId    = currentAudioTrackId;
         pp.screenMode      = -1;
-        dbExecutor.execute(() ->
-                PlaybackDatabase.getInstance(this).playbackDao().savePosition(pp));
+        nasSyncManager.savePosition(pp, pp.uri);
     }
 
     private void logTracks() {
@@ -460,9 +494,55 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             case MediaPlayer.Event.Vout:
                 break;
             case MediaPlayer.Event.EncounteredError:
-                loadingBar.setVisibility(View.GONE);
-                errorText.setVisibility(View.VISIBLE);
-                errorText.setText("동영상을 재생할 수 없습니다.");
+                if (DsFileApiClient.isNasUrl(currentUriKey)) {
+                    // NAS 스트림 오류 → SID 재발급 후 재시도
+                    Log.w(TAG, "[NAS] 스트림 오류, SID 재발급 시도");
+                    loadingBar.setVisibility(View.VISIBLE);
+                    errorText.setVisibility(View.GONE);
+                    final long resumePos = mediaPlayer != null ? mediaPlayer.getTime() : 0;
+                    final String dbKey = currentDbKey;
+                    final String nasFilePath = (PlaylistHolder.playlist != null
+                            && PlaylistHolder.currentIndex >= 0)
+                            ? PlaylistHolder.playlist.get(PlaylistHolder.currentIndex).nasPath
+                            : null;
+                    DsFileApiClient.login(new DsFileApiClient.Callback<String>() {
+                        @Override public void onResult(String newSid) {
+                            if (isFinishing() || isDestroyed()) return;
+                            if (nasFilePath == null) {
+                                showError("NAS 재연결 실패");
+                                return;
+                            }
+                            String newStream = DsFileApiClient.getStreamUrl(nasFilePath, newSid);
+                            currentUriKey = newStream;
+                            if (resumePos > 0) pendingSeekMs = resumePos;
+                            // 플레이리스트 항목도 갱신
+                            if (PlaylistHolder.playlist != null && PlaylistHolder.currentIndex >= 0) {
+                                VideoItem old = PlaylistHolder.playlist.get(PlaylistHolder.currentIndex);
+                                PlaylistHolder.playlist.set(PlaylistHolder.currentIndex,
+                                        VideoItem.nasFileWithStream(old.name, old.nasPath, newStream, old.canonicalUri));
+                            }
+                            // 기존 libVLC/mediaPlayer 해제 후 재초기화 (메모리 누수 방지)
+                            if (mediaPlayer != null) {
+                                mediaPlayer.setEventListener(null);
+                                mediaPlayer.detachViews();
+                                mediaPlayer.release();
+                                mediaPlayer = null;
+                            }
+                            if (libVLC != null) {
+                                libVLC.release();
+                                libVLC = null;
+                            }
+                            initPlayer(videoLayout, Uri.parse(newStream));
+                        }
+                        @Override public void onError(String msg) {
+                            if (!isFinishing() && !isDestroyed()) showError("NAS 재연결 실패: " + msg);
+                        }
+                    });
+                } else {
+                    loadingBar.setVisibility(View.GONE);
+                    errorText.setVisibility(View.VISIBLE);
+                    errorText.setText("동영상을 재생할 수 없습니다.");
+                }
                 break;
         }
     }
@@ -499,7 +579,8 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         }
 
         currentUriKey = item.uri.toString();
-        loadSavedPosition(currentUriKey);
+        currentDbKey  = item.canonicalUri != null ? item.canonicalUri : currentUriKey;
+        loadSavedPosition(currentDbKey);
 
         Media media = openMedia(item.uri);
         if (media != null) {
@@ -915,6 +996,12 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             }
         }
         return result;
+    }
+
+    private void showError(String msg) {
+        loadingBar.setVisibility(View.GONE);
+        errorText.setVisibility(View.VISIBLE);
+        errorText.setText(msg);
     }
 
     private String formatTime(long ms) {
