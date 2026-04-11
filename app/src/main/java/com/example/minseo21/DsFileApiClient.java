@@ -706,6 +706,58 @@ public class DsFileApiClient {
         });
     }
 
+    /**
+     * NAS에 사용자 재생 위치 JSON 업로드 (동기 버전 — 백그라운드 스레드에서 직접 호출).
+     * onPause 블로킹 flush 전용.
+     * @return true=성공, false=실패
+     */
+    public static boolean uploadUserPositionsSync(JSONObject positions) {
+        try {
+            String sid = cachedSid;
+            if (sid == null) return false;
+            JSONObject wrapper = new JSONObject();
+            wrapper.put("version", 1);
+            wrapper.put("positions", positions);
+            String filename = cfgUser.replaceAll("[^a-zA-Z0-9_\\-]", "_") + "_positions.json";
+            byte[] data = wrapper.toString().getBytes(StandardCharsets.UTF_8);
+            String result = uploadFile(cfgPosDir, filename, data, sid);
+            if (result.contains("\"code\":119")) {
+                String newSid = reLoginSync();
+                if (newSid != null) result = uploadFile(cfgPosDir, filename, data, newSid);
+            }
+            boolean ok = result.contains("\"success\":true");
+            Log.d(TAG, "uploadUserPositionsSync: " + filename + " → " + (ok ? "성공" : result));
+            return ok;
+        } catch (Exception e) {
+            Log.w(TAG, "uploadUserPositionsSync 오류: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * NAS에서 사용자 재생 위치 JSON 다운로드 (동기 버전 — 백그라운드 스레드에서 직접 호출).
+     * onPause 블로킹 flush 전용.
+     * @return positions JSONObject (실패 시 빈 객체)
+     */
+    public static JSONObject downloadUserPositionsSync() {
+        try {
+            String sid = cachedSid;
+            if (sid == null) return new JSONObject();
+            String filename = cfgUser.replaceAll("[^a-zA-Z0-9_\\-]", "_") + "_positions.json";
+            String filePath = cfgPosDir + "/" + filename;
+            String downloadUrl = getStreamUrl(filePath, sid);
+            String body = apiGet(downloadUrl);
+            JSONObject wrapper = new JSONObject(body);
+            JSONObject positions = wrapper.optJSONObject("positions");
+            if (positions == null) positions = new JSONObject();
+            Log.d(TAG, "downloadUserPositionsSync: " + positions.length() + " 항목");
+            return positions;
+        } catch (Exception e) {
+            Log.d(TAG, "downloadUserPositionsSync 없음: " + e.getMessage());
+            return new JSONObject();
+        }
+    }
+
     // ── 내부 유틸 ────────────────────────────────────────────────────────────
 
     /**
