@@ -84,11 +84,16 @@ public class NasSetupActivity extends AppCompatActivity {
         btnTest.setOnClickListener(v -> runConnectionTest());
 
         btnSave.setOnClickListener(v -> {
+            // 편집 모드에서 비밀번호 미입력 시 기존 비밀번호 유지
+            String passToSave = etPass.getText().toString();
+            if (passToSave.isEmpty() && editMode && credStore.hasCredentials()) {
+                passToSave = credStore.getPass();
+            }
             credStore.save(
                     etBaseUrl.getText().toString(),
                     etLanUrl.getText().toString(),
                     etUser.getText().toString(),
-                    etPass.getText().toString(),
+                    passToSave,
                     etBasePath.getText().toString(),
                     etPosDir.getText().toString()
             );
@@ -140,11 +145,18 @@ public class NasSetupActivity extends AppCompatActivity {
             @Override public void onError(String msg) {
                 if (isFinishing() || isDestroyed()) return;
                 setFieldsEnabled(true);
-                showResult(false, "연결 실패: " + msg);
-                btnSave.setEnabled(false);
-                btnSave.setAlpha(0.5f);
-                // 실패 시 기존 인증 정보로 복원
-                DsFileApiClient.init(credStore);
+                if (msg.startsWith("PORTAL_AUTH_REQUIRED:")) {
+                    // 릴레이가 차단됨 — 포털 인증은 NAS 탭 첫 진입 시 자동 처리
+                    showResult(true, "✓ NAS 주소 확인됨\n포털 인증 필요 — 저장 후 NAS 탭에서 자동으로 처리됩니다.");
+                    btnSave.setEnabled(true);
+                    btnSave.setAlpha(1.0f);
+                } else {
+                    showResult(false, "연결 실패: " + msg);
+                    btnSave.setEnabled(false);
+                    btnSave.setAlpha(0.5f);
+                    // 실패 시 기존 인증 정보로 복원
+                    DsFileApiClient.init(credStore);
+                }
             }
         });
     }

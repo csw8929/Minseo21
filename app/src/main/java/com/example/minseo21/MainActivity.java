@@ -236,13 +236,16 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         }
     }
 
-    /** NAS 파일이면 canonical URL, 로컬이면 URI 문자열 그대로 반환 */
+    /** NAS 파일이면 canonical URL, 로컬이면 URI 문자열 그대로 반환.
+     *  Playlist에 canonicalUri가 없으면 NAS 스트림 URL에서 _sid를 제거한 canonical을 재구성.
+     *  (세션간 _sid 누적 방지) */
     private String resolveDbKey(Uri uri) {
         if (PlaylistHolder.playlist != null && PlaylistHolder.currentIndex >= 0) {
             VideoItem vi = PlaylistHolder.playlist.get(PlaylistHolder.currentIndex);
             if (vi.canonicalUri != null) return vi.canonicalUri;
         }
-        return uri.toString();
+        // NAS 스트림 URL이면 canonical로 정규화 (_sid 누적 방지)
+        return DsFileApiClient.toCanonicalUrl(uri.toString());
     }
 
     private void initPlayer(VLCVideoLayout videoLayout, Uri videoUri) {
@@ -264,9 +267,9 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         options.add("--avcodec-threads=4");
         // 릴레이 연결 여부: direct.quickconnect.to 또는 quickconnect.to 경유 시 레이턴시 높음
         boolean isRelay = isNetwork && DsFileApiClient.isRelayUrl(videoUri.toString());
-        // 캐싱: 로컬 500ms / NAS 5000ms / 릴레이 15000ms
-        // 릴레이(대만 서버 경유)는 RTT ~560ms + 대역폭 제한 → 대형 버퍼 필요
-        options.add(isRelay ? "--network-caching=15000" : isNetwork ? "--network-caching=5000" : "--file-caching=500");
+        // 캐싱: 로컬 500ms / NAS 5000ms / 릴레이 45000ms
+        // 릴레이(대만 서버 경유)는 RTT ~560ms + 대역폭 제한 → 45초 선버퍼
+        options.add(isRelay ? "--network-caching=45000" : isNetwork ? "--network-caching=5000" : "--file-caching=500");
         options.add("--live-caching=300");
         if (isNetwork) {
             // NAS 스트리밍: 클럭 지터 허용 + 동기화 활성화
@@ -303,20 +306,33 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
 
         loadSavedPosition(currentDbKey);
 
-        Media media = openMedia(videoUri);
-        if (media == null) {
-            loadingBar.setVisibility(View.GONE);
-            errorText.setVisibility(View.VISIBLE);
-            errorText.setText("파일을 열 수 없습니다.");
-            return;
+        // TODO: 5G 환경에서 HLS 트랜스코딩(SYNO.VideoStation2.Streaming) 지원 예정.
+        //       현재는 5G 포함 모든 환경에서 직접 스트리밍으로 재생.
+        {
+            // WiFi / 5G / 로컬 파일 → 직접 재생
+            Media media = openMedia(videoUri);
+            if (media == null) {
+                loadingBar.setVisibility(View.GONE);
+                errorText.setVisibility(View.VISIBLE);
+                errorText.setText("파일을 열 수 없습니다.");
+                return;
+            }
+            mediaPlayer.setMedia(media);
+            media.release();
+            tryAddExternalSubtitles(videoUri);
+            mediaPlayer.play();
         }
-        
-        // setMedia() must come before tryAddExternalSubtitles() so that
-        // mediaPlayer.addSlave() has a media object to attach to
-        mediaPlayer.setMedia(media);
-        media.release();
-        tryAddExternalSubtitles(videoUri);
-        mediaPlayer.play();
+    }
+
+    /**
+     * NAS 스트림/캐노니컬 URL 에서 파일 경로 추출.
+     * 예: ...&path=%2Fvideo%2Ffoo.mkv&... → "/video/foo.mkv"
+     * NAS URL 이 아니거나 path 파라미터 없으면 null.
+     */
+    private static String extractNasPathFromUri(Uri uri) {
+        if (!DsFileApiClient.isNasUrl(uri.toString())) return null;
+        String path = uri.getQueryParameter("path");
+        return (path != null && !path.isEmpty()) ? path : null;
     }
 
     private void tryAddExternalSubtitles(Uri videoUri) {
@@ -583,6 +599,13 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             }
         } else {
             media = new Media(libVLC, uri);
+            // 포털 모드(QuickConnect + _SSID 쿠키)이면 libVLC HTTP 요청에 쿠키 헤더 추가
+            String cookieHeader = DsFileApiClient.getStreamCookieHeader();
+            if (cookieHeader != null && !cookieHeader.isEmpty()
+                    && ("http".equals(scheme) || "https".equals(scheme))) {
+                media.addOption(":http-extra-headers=Cookie: " + cookieHeader + "\r\n");
+                Log.d("NAS", "libVLC 쿠키 헤더 설정: " + cookieHeader.substring(0, Math.min(40, cookieHeader.length())));
+            }
         }
         return media;
     }
@@ -752,16 +775,20 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             pfd = null;
         }
 
-        currentUriKey = item.uri.toString();
-        currentDbKey  = item.canonicalUri != null ? item.canonicalUri : currentUriKey;
+        currentDbKey = item.canonicalUri != null ? item.canonicalUri : item.uri.toString();
         loadSavedPosition(currentDbKey);
 
-        Media media = openMedia(item.uri);
-        if (media != null) {
-            mediaPlayer.setMedia(media);
-            media.release();
-            tryAddExternalSubtitles(item.uri);
-            mediaPlayer.play();
+        // TODO: 5G 환경에서 HLS 트랜스코딩 지원 예정 — 현재는 직접 스트리밍.
+        {
+            // WiFi / 5G / 로컬 파일 → 직접 재생
+            currentUriKey = item.uri.toString();
+            Media media = openMedia(item.uri);
+            if (media != null) {
+                mediaPlayer.setMedia(media);
+                media.release();
+                tryAddExternalSubtitles(item.uri);
+                mediaPlayer.play();
+            }
         }
     }
 

@@ -52,12 +52,14 @@ public class DsFileApiClient {
 
     // ── 런타임 인증 정보 (NasCredentialStore 에서 초기화) ─────────────────────
     // DsFileConfig 상수를 fallback 으로 사용; 앱 시작 시 init() 로 덮어씀.
-    private static volatile String cfgBaseUrl  = DsFileConfig.BASE_URL;
-    private static volatile String cfgLanUrl   = DsFileConfig.LAN_URL;
-    private static volatile String cfgUser     = DsFileConfig.USER;
-    private static volatile String cfgPass     = DsFileConfig.PASS;
-    private static volatile String cfgBasePath = DsFileConfig.BASE_PATH;
-    private static volatile String cfgPosDir   = DsFileConfig.POS_DIR;
+    private static volatile String cfgBaseUrl     = DsFileConfig.BASE_URL;
+    private static volatile String cfgLanUrl      = DsFileConfig.LAN_URL;
+    private static volatile String cfgUser        = DsFileConfig.USER;
+    private static volatile String cfgPass        = DsFileConfig.PASS;
+    private static volatile String cfgBasePath    = DsFileConfig.BASE_PATH;
+    private static volatile String cfgPosDir      = DsFileConfig.POS_DIR;
+    private static volatile String cfgPortalCookie = ""; // QuickConnect 포털 _SSID 쿠키
+
 
     /**
      * NAS 인증 정보를 직접 지정한다. 연결 테스트 또는 저장 후 호출.
@@ -76,13 +78,30 @@ public class DsFileApiClient {
         Log.i(TAG, "NAS 인증 정보 적용 완료 (baseUrl=" + cfgBaseUrl + ")");
     }
 
-    /** NasCredentialStore 에서 읽은 인증 정보를 적용하는 편의 메서드. */
+    /** WebView 포털 로그인 후 획득한 쿠키(_SSID 포함)를 설정. */
+    public static void setPortalCookie(String cookie) {
+        cfgPortalCookie = (cookie != null) ? cookie : "";
+        if (!cfgPortalCookie.isEmpty()) {
+            Log.i(TAG, "포털 쿠키 설정됨: " + cfgPortalCookie.substring(0, Math.min(40, cfgPortalCookie.length())));
+        }
+    }
+
+    /** NasCredentialStore 에서 읽은 인증 정보를 적용하는 편의 메서드.
+     *  저장된 값이 비어 있으면 DsFileConfig 상수를 폴백으로 사용한다. */
     public static void init(NasCredentialStore store) {
-        init(store.getBaseUrl(), store.getLanUrl(), store.getUser(), store.getPass(),
+        String user = store.getUser();
+        String pass = store.getPass();
+        // 저장된 계정 정보가 없으면 DsFileConfig 하드코딩 값 사용
+        if (user.isEmpty()) user = DsFileConfig.USER;
+        if (pass.isEmpty()) pass = DsFileConfig.PASS;
+        init(store.getBaseUrl(), store.getLanUrl(), user, pass,
                 store.getBasePath(), store.getPosDir());
+        // 저장된 포털 쿠키도 함께 로드
+        cfgPortalCookie = store.getPortalCookie();
     }
 
     public static String getBasePath() { return cfgBasePath; }
+
 
     public interface Callback<T> {
         void onResult(T result);
@@ -100,11 +119,17 @@ public class DsFileApiClient {
     public static void login(Callback<String> cb) {
         executor.execute(() -> {
             try {
-                // QuickConnect URL인 경우 실제 NAS 주소 먼저 해석
+                // Step 1: QuickConnect 해석 — 릴레이 URL 확정 (포털 로그인 시에도 필요)
                 if (resolvedBase == null) {
                     String resolved = resolveQuickConnect(cfgBaseUrl);
                     resolvedBase = (resolved != null) ? resolved : cfgBaseUrl;
                     Log.i(TAG, "resolvedBase=" + resolvedBase);
+                }
+
+                // Step 2: 포털 쿠키가 있으면 cfgBaseUrl 로 POST 로그인 (SID 획득)
+                // resolvedBase 는 릴레이 URL 그대로 유지 — 이후 API 호출은 릴레이 경유
+                if (!cfgPortalCookie.isEmpty() && cfgBaseUrl.contains("quickconnect.to")) {
+                    if (tryPortalLoginInternal(cb)) return;
                 }
                 // QuickConnect relay 사용 시: 포털 쿠키 먼저 획득 후 로그인 시도
                 String relayCookie = null;
@@ -160,6 +185,15 @@ public class DsFileApiClient {
                 } else {
                     int code = json.optJSONObject("error") != null
                             ? json.getJSONObject("error").optInt("code", -1) : -1;
+                    // code=400/407: DSM Secure SignIn이 릴레이 IP 차단 → 포털 쿠키 인증으로 우회
+                    // (400: Invalid parameter / 407: Blocked IP source — 릴레이 경유 시 둘 다 발생)
+                    if ((code == 400 || code == 407) && cfgBaseUrl.contains("quickconnect.to")
+                            && resolvedBase != null && resolvedBase.contains("direct.quickconnect.to")) {
+                        Log.w(TAG, "릴레이 login code=" + code + " → 포털 쿠키 인증 필요");
+                        final String portalUrl = cfgBaseUrl;
+                        mainHandler.post(() -> cb.onError("PORTAL_AUTH_REQUIRED:" + portalUrl));
+                        return;
+                    }
                     String msg = "로그인 실패 (code=" + code + ")";
                     Log.e(TAG, msg);
                     mainHandler.post(() -> cb.onError(msg));
@@ -169,6 +203,124 @@ public class DsFileApiClient {
                 mainHandler.post(() -> cb.onError("NAS 연결 오류: " + e.getMessage()));
             }
         });
+    }
+
+    /**
+     * 저장된 포털 쿠키(_SSID)를 사용해 cfgBaseUrl 포털에 직접 POST 로그인.
+     * executor 스레드에서만 호출.
+     * @return true: 처리 완료 (cb.onResult 또는 cb.onError 호출됨). false: 재시도 필요.
+     */
+    private static boolean tryPortalLoginInternal(Callback<String> cb) {
+        try {
+            Log.d(TAG, "포털 쿠키 로그인 시도 → " + cfgBaseUrl);
+            String postBody = "api=SYNO.API.Auth&version=7&method=login"
+                    + "&account=" + URLEncoder.encode(cfgUser, "UTF-8")
+                    + "&passwd="  + URLEncoder.encode(cfgPass, "UTF-8")
+                    + "&session=FileStation&format=sid";
+            String result = httpPostWithCookie(cfgBaseUrl + "/webapi/entry.cgi",
+                    cfgPortalCookie, postBody);
+            if (result.startsWith("<")) {
+                // 포털이 HTML 반환 — 쿠키 만료
+                Log.w(TAG, "포털 로그인: HTML 응답 → 쿠키 만료, 재인증 필요");
+                cfgPortalCookie = "";
+                final String portalUrl = cfgBaseUrl;
+                mainHandler.post(() -> cb.onError("PORTAL_AUTH_REQUIRED:" + portalUrl));
+                return true;
+            }
+            JSONObject json = new JSONObject(result);
+            if (json.optBoolean("success", false)) {
+                String sid = json.getJSONObject("data").getString("sid");
+                cachedSid = sid;
+                // resolvedBase 는 릴레이 URL 유지 — API 호출은 릴레이 경유
+                Log.i(TAG, "포털 로그인 OK, SID=" + sid.substring(0, Math.min(8, sid.length())) + "… resolvedBase=" + resolvedBase);
+                mainHandler.post(() -> cb.onResult(sid));
+                return true;
+            }
+            int errCode = json.optJSONObject("error") != null
+                    ? json.getJSONObject("error").optInt("code", -1) : -1;
+            Log.w(TAG, "포털 로그인 실패 code=" + errCode + " → 쿠키 무효, 재인증 필요");
+            cfgPortalCookie = "";
+            final String portalUrl = cfgBaseUrl;
+            mainHandler.post(() -> cb.onError("PORTAL_AUTH_REQUIRED:" + portalUrl));
+            return true;
+        } catch (Exception e) {
+            Log.d(TAG, "포털 로그인 exception (릴레이 시도로 fall-through): " + e.getMessage());
+            return false; // 네트워크 오류 → 기존 릴레이 방식으로 재시도
+        }
+    }
+
+    /**
+     * POST 요청 with Cookie 헤더.
+     * Content-Type: application/x-www-form-urlencoded
+     */
+    private static String httpPostWithCookie(String urlStr, String cookieStr,
+                                              String postBody) throws Exception {
+        java.net.URL u = new java.net.URL(urlStr);
+        String origin = u.getProtocol() + "://" + u.getHost()
+                + (u.getPort() > 0 ? ":" + u.getPort() : "");
+
+        HttpURLConnection conn = openTrustedConnection(urlStr);
+        conn.setConnectTimeout(CONNECT_TIMEOUT);
+        conn.setReadTimeout(READ_TIMEOUT);
+        conn.setRequestMethod("POST");
+        conn.setDoOutput(true);
+        conn.setInstanceFollowRedirects(false);
+        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+        conn.setRequestProperty("User-Agent", BROWSER_UA);
+        conn.setRequestProperty("Accept", "application/json, text/plain, */*");
+        conn.setRequestProperty("X-Requested-With", "XMLHttpRequest");
+        conn.setRequestProperty("Origin", origin);
+        conn.setRequestProperty("Referer", origin + "/");
+        if (cookieStr != null && !cookieStr.isEmpty()) {
+            conn.setRequestProperty("Cookie", cookieStr);
+        }
+        byte[] bodyBytes = postBody.getBytes(StandardCharsets.UTF_8);
+        conn.setRequestProperty("Content-Length", String.valueOf(bodyBytes.length));
+        try (OutputStream os = conn.getOutputStream()) {
+            os.write(bodyBytes);
+        }
+        int code = conn.getResponseCode();
+        Log.d(TAG, "HTTP POST " + code + " ← " + urlStr.replaceAll("passwd=[^&]+", "passwd=***"));
+        InputStream is = (code < 400) ? conn.getInputStream() : conn.getErrorStream();
+        if (is == null) {
+            conn.disconnect();
+            throw new Exception("HTTP " + code + " — empty body");
+        }
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = br.readLine()) != null) sb.append(line);
+        }
+        conn.disconnect();
+        return sb.toString();
+    }
+
+    // ── API 공통 헬퍼 ────────────────────────────────────────────────────────
+
+    /**
+     * 포털 쿠키 모드 여부.
+     * _SSID 쿠키가 있고 QuickConnect URL 이면 true — 모든 API 호출이 포털 경유.
+     */
+    private static boolean isPortalMode() {
+        return !cfgPortalCookie.isEmpty() && cfgBaseUrl.contains("quickconnect.to");
+    }
+
+    /**
+     * API 호출에 사용할 base URL.
+     * 포털 모드 → cfgBaseUrl (포털 도메인, 쿠키와 함께 사용)
+     * 일반 모드 → resolvedBase (릴레이/LAN/직접접속)
+     */
+    private static String apiBase() {
+        if (isPortalMode()) return cfgBaseUrl;
+        return resolvedBase != null ? resolvedBase : cfgBaseUrl;
+    }
+
+    /**
+     * GET 요청 — 포털 모드이면 cfgPortalCookie 를 Cookie 헤더로 포함.
+     */
+    private static String apiGet(String url) throws Exception {
+        if (isPortalMode()) return httpGetWithCookie(url, cfgPortalCookie);
+        return httpGet(url);
     }
 
     // ── 폴더 목록 ────────────────────────────────────────────────────────────
@@ -186,7 +338,7 @@ public class DsFileApiClient {
     private static void listFolderSync(String folderPath, String sid,
                                        Callback<List<VideoItem>> cb, boolean isRetry) {
         try {
-            String base = resolvedBase != null ? resolvedBase : cfgBaseUrl;
+            String base = apiBase();
             String url = base + "/webapi/entry.cgi"
                     + "?api=SYNO.FileStation.List&version=2&method=list"
                     + "&folder_path=" + URLEncoder.encode(folderPath, "UTF-8")
@@ -194,8 +346,8 @@ public class DsFileApiClient {
                     + "&additional=%5B%22size%22%2C%22time%22%5D"
                     + "&limit=2000&offset=0"
                     + "&_sid=" + sid;
-            Log.d(TAG, "listFolder → " + folderPath + (isRetry ? " [retry]" : ""));
-            String body = httpGet(url);
+            Log.d(TAG, "listFolder → " + folderPath + (isPortalMode() ? " [포털모드]" : "") + (isRetry ? " [retry]" : ""));
+            String body = apiGet(url);
             JSONObject json = new JSONObject(body);
 
             if (!json.optBoolean("success", false)) {
@@ -264,6 +416,24 @@ public class DsFileApiClient {
     /** 동기 재로그인 — executor 내부에서만 호출. 성공 시 새 SID 반환, 실패 시 null */
     private static String reLoginSync() {
         try {
+            // 포털 모드이면 포털 POST 로그인 재시도
+            if (isPortalMode()) {
+                String postBody = "api=SYNO.API.Auth&version=7&method=login"
+                        + "&account=" + URLEncoder.encode(cfgUser, "UTF-8")
+                        + "&passwd="  + URLEncoder.encode(cfgPass, "UTF-8")
+                        + "&session=FileStation&format=sid";
+                String result = httpPostWithCookie(cfgBaseUrl + "/webapi/entry.cgi",
+                        cfgPortalCookie, postBody);
+                JSONObject json = new JSONObject(result);
+                if (json.optBoolean("success", false)) {
+                    String sid = json.getJSONObject("data").getString("sid");
+                    cachedSid = sid;
+                    Log.i(TAG, "reLoginSync(portal) OK, SID=" + sid.substring(0, Math.min(8, sid.length())) + "…");
+                    return sid;
+                }
+                Log.w(TAG, "reLoginSync(portal) 실패: " + result.substring(0, Math.min(100, result.length())));
+                return null;
+            }
             String base = resolvedBase != null ? resolvedBase : cfgBaseUrl;
             String loginUrl = base + "/webapi/auth.cgi"
                     + "?api=SYNO.API.Auth&version=6&method=login"
@@ -284,12 +454,19 @@ public class DsFileApiClient {
         return null;
     }
 
+    // TODO: HLS 트랜스코딩 (SYNO.VideoStation2.Streaming) — 추후 구현 예정.
+    // QuickConnect 릴레이 환경에서 Streaming API error 120이 반환되어 현재 미지원.
+    // 구현 시 참고: VideoStation2.Streaming.open, stream_id → m3u8 URL 구성.
+
     // ── URL 헬퍼 (동기, 네트워크 없음) ──────────────────────────────────────
 
-    /** 스트림 URL (SID 포함) — libVLC 재생용 */
+    /** 스트림 URL (SID 포함) — libVLC 재생용.
+     *  포털 모드라도 릴레이(resolvedBase)가 확인됐으면 릴레이 경유.
+     *  릴레이는 레이어-4 TCP 터널이라 포털 HTTP 프록시 오버헤드가 없어서 처리량이 높다.
+     *  인증은 _sid URL 파라미터만으로 충분 (쿠키 불필요). */
     public static String getStreamUrl(String filePath, String sid) {
         try {
-            String base = resolvedBase != null ? resolvedBase : cfgBaseUrl;
+            String base = streamBase();
             return base + "/webapi/entry.cgi"
                     + "?api=SYNO.FileStation.Download&version=2&method=download"
                     + "&path=" + URLEncoder.encode(filePath, "UTF-8")
@@ -297,6 +474,18 @@ public class DsFileApiClient {
         } catch (Exception e) {
             return "";
         }
+    }
+
+    /**
+     * 비디오 스트리밍에 사용할 base URL.
+     * 포털 모드 + 릴레이 확인 → resolvedBase (TCP 터널, 프록시 오버헤드 없음)
+     * 그 외                   → apiBase() (포털 or 직접접속)
+     */
+    private static String streamBase() {
+        if (isPortalMode() && resolvedBase != null && !resolvedBase.equals(cfgBaseUrl)) {
+            return resolvedBase;
+        }
+        return apiBase();
     }
 
     /** Canonical URL (SID 없음) — Room DB 키 */
@@ -312,9 +501,36 @@ public class DsFileApiClient {
         }
     }
 
-    /** Canonical URL + SID 붙이기 — 이어보기 다이얼로그용 */
+    /** Canonical URL + SID 붙이기 — 이어보기 다이얼로그용.
+     *  기존 _sid 파라미터를 제거한 뒤 새 SID를 붙임 (세션간 누적 방지).
+     *  포털 모드 + 릴레이 확인 시 base를 릴레이로 교체 (HTTP 프록시 우회). */
     public static String canonicalToStream(String canonicalUrl, String sid) {
-        return canonicalUrl + "&_sid=" + sid;
+        // _sid 누적 방지: 먼저 toCanonicalUrl로 정규화 (_sid 제거, cfgBaseUrl 기반)
+        String clean = toCanonicalUrl(canonicalUrl);
+        // 릴레이 사용 시 base 교체
+        String base = streamBase();
+        String rewritten = clean;
+        if (!base.equals(cfgBaseUrl) && clean.startsWith(cfgBaseUrl)) {
+            rewritten = base + clean.substring(cfgBaseUrl.length());
+        }
+        return rewritten + "&_sid=" + sid;
+    }
+
+    /**
+     * NAS 스트림 URL을 canonical URL로 정규화.
+     * _sid 파라미터 제거, 릴레이 base를 cfgBaseUrl로 교체.
+     * Room DB 키 및 세션 간 재사용 목적. NAS URL이 아니면 원본 반환.
+     */
+    public static String toCanonicalUrl(String streamUrl) {
+        if (!isNasUrl(streamUrl)) return streamUrl;
+        try {
+            android.net.Uri u = android.net.Uri.parse(streamUrl);
+            String path = u.getQueryParameter("path");
+            if (path != null && !path.isEmpty()) {
+                return getCanonicalUrl(path); // _sid 없음, cfgBaseUrl 기반
+            }
+        } catch (Exception ignored) {}
+        return streamUrl;
     }
 
     /** NAS 스트림 URL 여부 판단 */
@@ -325,6 +541,45 @@ public class DsFileApiClient {
     /** 릴레이 경유 URL 여부 — direct.quickconnect.to 또는 quickconnect.to 포함 시 true */
     public static boolean isRelayUrl(String url) {
         return url != null && url.contains("quickconnect.to");
+    }
+
+    /**
+     * 현재 WiFi 전용 연결 여부.
+     * WiFi만 있고 셀룰러가 없을 때만 true → 직접/최고화질 스트리밍.
+     * 셀룰러(5G/LTE)가 하나라도 있으면 false → HLS 트랜스코딩.
+     * 판단 불가 시 false (안전한 기본값 — HLS 쪽으로 폴백).
+     */
+    public static boolean isWifi(android.content.Context ctx) {
+        try {
+            android.net.ConnectivityManager cm = (android.net.ConnectivityManager)
+                    ctx.getSystemService(android.content.Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return false;
+            android.net.Network net = cm.getActiveNetwork();
+            if (net == null) return false;
+            android.net.NetworkCapabilities nc = cm.getNetworkCapabilities(net);
+            if (nc == null) return false;
+            boolean hasWifi     = nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI);
+            boolean hasCellular = nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR);
+            Log.d(TAG, "네트워크: WiFi=" + hasWifi + " Cellular=" + hasCellular);
+            // 셀룰러가 조금이라도 있으면 모바일로 판단 (Samsung WiFi콜링 오감지 방지)
+            return hasWifi && !hasCellular;
+        } catch (Exception e) {
+            Log.w(TAG, "isWifi 감지 실패: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * libVLC HTTP 스트리밍에 설정해야 하는 Cookie 헤더 값.
+     * 포털 모드 + 릴레이 경유 스트리밍이면 null (TCP 터널, _sid 인증만 필요).
+     * 포털 모드 + 릴레이 미확인이면 _SSID 포함 쿠키 반환.
+     * 그 외에는 null.
+     */
+    public static String getStreamCookieHeader() {
+        if (!isPortalMode()) return null;
+        // 릴레이가 확인됐으면 쿠키 불필요 — streamBase()가 릴레이 URL 반환
+        if (resolvedBase != null && !resolvedBase.equals(cfgBaseUrl)) return null;
+        return cfgPortalCookie;
     }
 
     // ── 위치 동기화 (NAS JSON 파일) ──────────────────────────────────────────
@@ -371,7 +626,7 @@ public class DsFileApiClient {
                 String filename = posFilename(canonicalUrl);
                 String filePath = cfgPosDir + "/" + filename;
                 String downloadUrl = getStreamUrl(filePath, sid);
-                String body = httpGet(downloadUrl);
+                String body = apiGet(downloadUrl);
 
                 // 404 / 에러 응답은 JSON 파싱 실패로 처리
                 JSONObject json = new JSONObject(body);
@@ -633,8 +888,8 @@ public class DsFileApiClient {
                 // hp = ["gomji17", "tw3", "quickconnect", "to"] → region = hp[1] if length>=4
                 String region = (hp.length >= 4) ? hp[1] : null;
 
-                // 시도할 릴레이 포트 (Synology 릴레이는 16811, 6690, 443, 80 등 사용)
-                int[] relayPorts = {16811, 16812, 6690, 443, 80};
+                // 시도할 릴레이 포트 (DS Video 실측: 28095 HTTP, 16811 HTTPS 등)
+                int[] relayPorts = {28095, 16811, 16812, 6690, 443, 80};
 
                 List<String> directCandidates = new ArrayList<>();
                 if (region != null) {
@@ -1111,15 +1366,17 @@ public class DsFileApiClient {
                 }
             }
 
-            // QuickConnect relay 서버
+            // QuickConnect relay 서버 — HTTP 먼저 (DS Video 동작 방식, SSL 인증서 문제 없음)
             if (env != null) {
                 String relayIp = env.optString("relay_ip", "");
                 String relayDn = env.optString("relay_dn", "");
                 int    relayPort = env.optInt("relay_port", 443);
                 if (!relayIp.isEmpty() && !relayIp.equals("NULL")) {
+                    out.add("http://"  + relayIp + ":" + relayPort);
                     out.add("https://" + relayIp + ":" + relayPort);
                 }
                 if (!relayDn.isEmpty() && !relayDn.equals("NULL")) {
+                    out.add("http://"  + relayDn + ":" + relayPort);
                     out.add("https://" + relayDn + ":" + relayPort);
                 }
             }
@@ -1161,16 +1418,20 @@ public class DsFileApiClient {
                 int    relayPort = obj.optInt("relay_port", 443);
                 String relayPath = obj.optString("relay_path", "");
                 if (!relayIp.isEmpty() && !relayIp.equals("NULL")) {
-                    String base = "https://" + relayIp + ":" + relayPort;
-                    if (!relayPath.isEmpty()) base += relayPath;
-                    Log.d(TAG, "tunnel candidate relay_ip(" + field + "): " + base);
-                    out.add(base);
+                    String baseHttp  = "http://"  + relayIp + ":" + relayPort;
+                    String baseHttps = "https://" + relayIp + ":" + relayPort;
+                    if (!relayPath.isEmpty()) { baseHttp += relayPath; baseHttps += relayPath; }
+                    Log.d(TAG, "tunnel candidate relay_ip(" + field + "): " + baseHttp);
+                    out.add(baseHttp);
+                    out.add(baseHttps);
                 }
                 if (!relayDn.isEmpty() && !relayDn.equals("NULL")) {
-                    String base = "https://" + relayDn + ":" + relayPort;
-                    if (!relayPath.isEmpty()) base += relayPath;
-                    Log.d(TAG, "tunnel candidate relay_dn(" + field + "): " + base);
-                    out.add(base);
+                    String baseHttp  = "http://"  + relayDn + ":" + relayPort;
+                    String baseHttps = "https://" + relayDn + ":" + relayPort;
+                    if (!relayPath.isEmpty()) { baseHttp += relayPath; baseHttps += relayPath; }
+                    Log.d(TAG, "tunnel candidate relay_dn(" + field + "): " + baseHttp);
+                    out.add(baseHttp);
+                    out.add(baseHttps);
                 }
             }
             // 표준 server/external 경로도 시도 (get_server_info 와 동일 형식일 수 있음)
@@ -1454,7 +1715,7 @@ public class DsFileApiClient {
     /** Multipart POST 로 파일 업로드. 서버 응답 body 반환 */
     private static String uploadFile(String destFolder, String filename, byte[] content, String sid) throws Exception {
         String boundary = "----MinseoNasBoundary" + System.currentTimeMillis();
-        String base     = resolvedBase != null ? resolvedBase : cfgBaseUrl;
+        String base     = apiBase();
         // _sid를 URL 파라미터로도 전달 (일부 DSM 버전에서 form field만으로 인증 안 됨)
         String urlStr   = base + "/webapi/entry.cgi?_sid=" + URLEncoder.encode(sid, "UTF-8");
         HttpURLConnection conn = openTrustedConnection(urlStr);
@@ -1463,6 +1724,10 @@ public class DsFileApiClient {
         conn.setRequestMethod("POST");
         conn.setDoOutput(true);
         conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+        // 포털 모드이면 쿠키 헤더 추가
+        if (isPortalMode() && !cfgPortalCookie.isEmpty()) {
+            conn.setRequestProperty("Cookie", cfgPortalCookie);
+        }
 
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         appendField(baos, boundary, "api",            "SYNO.FileStation.Upload");

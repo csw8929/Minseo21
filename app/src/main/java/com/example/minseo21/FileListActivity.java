@@ -88,6 +88,17 @@ public class FileListActivity extends AppCompatActivity {
                 }
             });
 
+    private final ActivityResultLauncher<Intent> portalLoginLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (result.getResultCode() == Activity.RESULT_OK) {
+                    // 포털 쿠키 획득 완료 — NAS 재연결 시도
+                    nasSid = null;
+                    if (currentTab == TAB_NAS) connectNas();
+                } else {
+                    showNasError("포털 인증이 취소되었습니다.");
+                }
+            });
+
     @Override
     protected void onSaveInstanceState(@NonNull Bundle outState) {
         super.onSaveInstanceState(outState);
@@ -415,7 +426,15 @@ public class FileListActivity extends AppCompatActivity {
             @Override public void onError(String msg) {
                 if (isFinishing() || isDestroyed()) return;
                 nasSid = null;
-                showNasError(msg);
+                if (msg.startsWith("PORTAL_AUTH_REQUIRED:")) {
+                    String url = msg.substring("PORTAL_AUTH_REQUIRED:".length());
+                    showNasLoading("포털 인증 화면 열기 중…");
+                    Intent intent = new Intent(FileListActivity.this, PortalLoginActivity.class);
+                    intent.putExtra(PortalLoginActivity.EXTRA_PORTAL_URL, url);
+                    portalLoginLauncher.launch(intent);
+                } else {
+                    showNasError(msg);
+                }
             }
         });
     }
@@ -452,7 +471,7 @@ public class FileListActivity extends AppCompatActivity {
             nasPathStack.push(item.bucketId); // bucketId = NAS 경로
             loadNasFolder(item.bucketId);
         } else {
-            // 파일 탭 → 플레이리스트 구성 후 재생
+            // 플레이리스트: 직접 스트림 URL 로 구성 (playlist navigation 용)
             List<VideoItem> allFiles = nasAdapter.getAllFiles();
             List<VideoItem> playlist = new ArrayList<>();
             int targetIdx = 0;
@@ -464,9 +483,21 @@ public class FileListActivity extends AppCompatActivity {
             }
             PlaylistHolder.playlist = playlist;
             PlaylistHolder.currentIndex = targetIdx;
-            String streamUrl = DsFileApiClient.getStreamUrl(item.nasPath, nasSid);
-            playVideo(Uri.parse(streamUrl), item.name);
+
+            final int finalIdx = targetIdx;
+            final String directUrl = DsFileApiClient.getStreamUrl(item.nasPath, nasSid);
+
+            // TODO: 5G 환경에서 HLS 트랜스코딩 지원 예정 — 현재는 직접 스트리밍.
+            playVideo(Uri.parse(directUrl), item.name);
         }
+    }
+
+    /** 파일 목록 뷰 다시 표시 (HLS 로딩 완료/실패 후 호출) */
+    private void showNasList() {
+        nasLoadingView.setVisibility(View.GONE);
+        nasErrorView.setVisibility(View.GONE);
+        rvNas.setVisibility(View.VISIBLE);
+        updateNasPath();
     }
 
     private void showNasLoading(String msg) {

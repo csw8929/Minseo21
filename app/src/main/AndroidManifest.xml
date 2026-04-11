@@ -6,6 +6,7 @@
         android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
         android:allowBackup="true"
@@ -212,6 +213,12 @@
             android:name=".NasSetupActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
+
+        <!-- QuickConnect 포털 WebView 로그인 (_SSID 쿠키 획득) -->
+        <activity
+            android:name=".PortalLoginActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
 
     </application>
 

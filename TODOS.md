@@ -151,6 +151,23 @@ Updated 2026-04-10 (eng-review fixes + basePath/posDir UI + quality/subtitle fix
 
 ---
 
+## P3 — DsFileApiClient 갓 클래스 분리
+
+**What:** `DsFileApiClient.java`가 2,441줄로 비대해짐. 관심사 단위로 클래스 분리.
+
+**Why:** HLS 트랜스코딩 코드 추가로 파일이 더 커졌고, VS 조회 / 스트리밍 / 포지션 싱크 / 인증이 하나의 파일에 혼재. 새 기능 추가나 디버그 시 찾기 어려움.
+
+**제안 분리 단위:**
+- `DsAuthManager` — login, SID 캐시, portal 쿠키
+- `DsFileClient` — listFolder, streamUrl, canonicalUrl
+- `DsVideoStationClient` — VS ID 조회, HLS openStream, extractStreamUrl
+- `DsPositionSyncClient` — savePositionToNas, loadPositionFromNas
+
+**Effort:** L (리팩터 전용 세션 필요)
+**Depends on:** HLS 기능이 device-test로 안정화된 후.
+
+---
+
 ## P2 — 외부 네트워크(모바일 데이터)에서 NAS 접속 지원
 
 **What:** Wi-Fi(로컬 LAN) 환경에서는 연결되지만 외부 네트워크(모바일 데이터, 외부 Wi-Fi)에서는 NAS 접속 불가. 외부에서도 동일하게 사용할 수 있도록 한다.
@@ -174,3 +191,28 @@ Updated 2026-04-10 (eng-review fixes + basePath/posDir UI + quality/subtitle fix
 
 **Effort:** S~M (환경에 따라 다름 — QuickConnect URL만 맞게 입력하면 이미 동작할 수도 있음)
 **Depends on:** P1(최초 설치 인증 UI) 완료 후 진행.
+
+---
+
+## P2 — 5G 환경 HLS 트랜스코딩 (SYNO.VideoStation2.Streaming)
+
+**What:** 5G/LTE 모바일 환경에서 NAS 스트리밍 시 버퍼링이 심해 시청 불가. VideoStation2의 HLS 트랜스코딩 API(`SYNO.VideoStation2.Streaming.open`)를 사용해 720p로 변환 후 스트리밍.
+
+**Why:** 원본 파일(MKV 1080p ~5GB)을 그대로 스트리밍하면 릴레이 대역폭(약 1Mbps) 초과로 버퍼링. VideoStation이 서버 측에서 720p HLS로 트랜스코딩하면 1/5 이하의 대역폭으로 스트리밍 가능.
+
+**조사 결과 (2026-04-11):**
+- VS2.Streaming.open에 `error 120 reason:"type"` 반환 — 모든 파라미터 조합에서 실패.
+- QuickConnect 릴레이(synr-tw3.GOMJI17.direct.quickconnect.to:28095)가 VS2.Streaming API를 차단하는 것으로 추정.
+- DS Video 앱은 5G에서 FileStation.Download 직접 스트리밍을 사용하는 것으로 추정 (HLS 미사용).
+- LAN 환경 테스트 미수행 — LAN에서는 API가 동작할 가능성 있음.
+
+**구현 방향:**
+1. LAN(Wi-Fi) 환경에서 VS2.Streaming.open 동작 확인 (릴레이 차단 여부 검증)
+2. DSM Log Center에서 DS Video가 5G 스트리밍 시 호출하는 API 확인
+3. 릴레이 차단 확인 시: LAN 전용 HLS 또는 다른 접근 방식 검토
+4. `DsFileApiClient.java:457` TODO 주석 — 구현 시작점
+
+**현재 동작:** 모든 환경에서 직접 스트리밍 (5G에서는 버퍼링 발생).
+
+**Effort:** M~L (릴레이 차단 우회 방법 미확인 — 조사 필요)
+**Depends on:** LAN 테스트 + DSM 로그 확인 선행 필요.

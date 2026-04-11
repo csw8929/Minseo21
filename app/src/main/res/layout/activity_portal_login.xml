@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <TextView
+        android:id="@+id/tvPortalStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="10dp"
+        android:text="NAS 포털 연결 중..."
+        android:textSize="13sp"
+        android:background="#CC000000"
+        android:textColor="#FFFFFFFF"
+        android:ellipsize="end"
+        android:singleLine="true" />
+
+    <WebView
+        android:id="@+id/webViewPortal"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+</LinearLayout>
