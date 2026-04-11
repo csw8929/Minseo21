@@ -647,6 +647,65 @@ public class DsFileApiClient {
         });
     }
 
+    /**
+     * 사용자 전체 재생 위치 JSON을 NAS에 업로드.
+     * 파일명: {cfgUser}_positions.json, 저장 경로: cfgPosDir
+     */
+    public static void uploadUserPositions(JSONObject positions, Callback<Boolean> cb) {
+        executor.execute(() -> {
+            try {
+                String sid = cachedSid;
+                if (sid == null) { mainHandler.post(() -> cb.onError("SID 없음")); return; }
+                JSONObject wrapper = new JSONObject();
+                wrapper.put("version", 1);
+                wrapper.put("positions", positions);
+                String filename = cfgUser.replaceAll("[^a-zA-Z0-9_\\-]", "_") + "_positions.json";
+                byte[] data = wrapper.toString().getBytes(StandardCharsets.UTF_8);
+                String result = uploadFile(cfgPosDir, filename, data, sid);
+                if (result.contains("\"code\":119")) {
+                    String newSid = reLoginSync();
+                    if (newSid != null) {
+                        result = uploadFile(cfgPosDir, filename, data, newSid);
+                    }
+                }
+                final boolean ok = result.contains("\"success\":true");
+                final String finalResult = result;
+                Log.d(TAG, "uploadUserPositions: " + filename + " → " + (ok ? "성공" : result));
+                mainHandler.post(() -> { if (ok) cb.onResult(true); else cb.onError(finalResult); });
+            } catch (Exception e) {
+                Log.w(TAG, "uploadUserPositions 오류: " + e.getMessage());
+                mainHandler.post(() -> cb.onError(e.getMessage()));
+            }
+        });
+    }
+
+    /**
+     * NAS에서 사용자 재생 위치 JSON 다운로드.
+     * 파일 없으면 빈 JSONObject 반환.
+     */
+    public static void downloadUserPositions(Callback<JSONObject> cb) {
+        executor.execute(() -> {
+            try {
+                String sid = cachedSid;
+                if (sid == null) { mainHandler.post(() -> cb.onResult(new JSONObject())); return; }
+                String filename = cfgUser.replaceAll("[^a-zA-Z0-9_\\-]", "_") + "_positions.json";
+                String filePath = cfgPosDir + "/" + filename;
+                String downloadUrl = getStreamUrl(filePath, sid);
+                String body = apiGet(downloadUrl);
+                JSONObject wrapper = new JSONObject(body);
+                JSONObject positions = wrapper.optJSONObject("positions");
+                if (positions == null) positions = new JSONObject();
+                final JSONObject result = positions;
+                Log.d(TAG, "downloadUserPositions: " + result.length() + " 항목");
+                mainHandler.post(() -> cb.onResult(result));
+            } catch (Exception e) {
+                // 파일 없거나 파싱 오류 → 빈 객체 반환
+                Log.d(TAG, "downloadUserPositions 없음: " + e.getMessage());
+                mainHandler.post(() -> cb.onResult(new JSONObject()));
+            }
+        });
+    }
+
     // ── 내부 유틸 ────────────────────────────────────────────────────────────
 
     /**
