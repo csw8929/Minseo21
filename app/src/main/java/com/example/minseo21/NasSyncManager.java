@@ -3,6 +3,7 @@ package com.example.minseo21;
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.util.Log;
 
 import org.json.JSONObject;
@@ -51,12 +52,14 @@ public class NasSyncManager {
         public final String nasPath;    // "/video/폴더/파일.mkv" — null이면 로컬 파일
         public final long   positionMs;
         public final long   updatedAt;
+        public final String deviceId;   // 저장한 단말의 ANDROID_ID. null이면 구버전 항목.
 
-        NasResumeEntry(String syncKey, String nasPath, long positionMs, long updatedAt) {
+        NasResumeEntry(String syncKey, String nasPath, long positionMs, long updatedAt, String deviceId) {
             this.syncKey    = syncKey;
             this.nasPath    = nasPath;
             this.positionMs = positionMs;
             this.updatedAt  = updatedAt;
+            this.deviceId   = deviceId;
         }
 
         /** syncKey의 마지막 세그먼트 = 파일명 */
@@ -87,8 +90,10 @@ public class NasSyncManager {
             if (bestKey == null) return null;
             String np = bestEntry.optString("nasPath", null);
             if (np != null && np.isEmpty()) np = null;
+            String did = bestEntry.optString("deviceId", null);
+            if (did != null && did.isEmpty()) did = null;
             return new NasResumeEntry(bestKey, np,
-                    bestEntry.optLong("positionMs", 0), bestTime);
+                    bestEntry.optLong("positionMs", 0), bestTime, did);
         } catch (Exception e) {
             Log.d(TAG, "findMostRecentEntry 오류: " + e.getMessage());
             return null;
@@ -146,6 +151,7 @@ public class NasSyncManager {
             entry.put("subtitleTrackId", pos.subtitleTrackId);
             entry.put("screenMode",      pos.screenMode);
             entry.put("updatedAt",       pos.updatedAt);
+            entry.put("deviceId",        getDeviceId());
             if (nasPath != null && !nasPath.isEmpty()) entry.put("nasPath", nasPath);
             positionsCache.put(syncKey, entry);
             dirty.set(true);
@@ -231,17 +237,29 @@ public class NasSyncManager {
             long nasUpdatedAt = entry.optLong("updatedAt", 0);
             if (dbPos != null && dbPos.updatedAt >= nasUpdatedAt) return; // 로컬이 더 최신
 
+            // 같은 단말이 저장한 항목: 모든 설정 복원
+            // 다른 단말이 저장한 항목: 위치만 복원, screenMode/audioTrackId/subtitleTrackId 무시
+            //   (단말마다 화면 설정/자막 취향이 다를 수 있음)
+            String savedDeviceId = entry.optString("deviceId", null);
+            boolean isSameDevice = savedDeviceId != null && savedDeviceId.equals(getDeviceId());
+
             PlaybackPosition nasPos = new PlaybackPosition();
             nasPos.uri             = roomDbKey;
             nasPos.positionMs      = entry.optLong("positionMs", 0);
-            nasPos.audioTrackId    = entry.optInt("audioTrackId",    Integer.MIN_VALUE);
-            nasPos.subtitleTrackId = entry.optInt("subtitleTrackId", Integer.MIN_VALUE);
-            nasPos.screenMode      = entry.optInt("screenMode",      -1);
+            nasPos.audioTrackId    = isSameDevice ? entry.optInt("audioTrackId",    Integer.MIN_VALUE) : Integer.MIN_VALUE;
+            nasPos.subtitleTrackId = isSameDevice ? entry.optInt("subtitleTrackId", Integer.MIN_VALUE) : Integer.MIN_VALUE;
+            nasPos.screenMode      = isSameDevice ? entry.optInt("screenMode", -1) : -1;
             nasPos.updatedAt       = nasUpdatedAt;
-            Log.d(TAG, "NAS 캐시가 더 최신: " + nasPos.positionMs + "ms (key=" + syncKey + ")");
+            Log.d(TAG, "NAS 캐시가 더 최신: " + nasPos.positionMs + "ms (key=" + syncKey
+                    + ", sameDevice=" + isSameDevice + ")");
             mainHandler.post(() -> cb.onPosition(nasPos));
         } catch (Exception e) {
             Log.d(TAG, "NAS 캐시 읽기 오류: " + e.getMessage());
         }
+    }
+
+    /** 이 단말의 고유 ID (ANDROID_ID). */
+    public String getDeviceId() {
+        return Settings.Secure.getString(context.getContentResolver(), Settings.Secure.ANDROID_ID);
     }
 }

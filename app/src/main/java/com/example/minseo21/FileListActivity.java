@@ -299,8 +299,15 @@ public class FileListActivity extends AppCompatActivity {
                 long localTime = (localLast != null) ? localLast.updatedAt : 0;
                 long nasTime   = (nasEntry  != null) ? nasEntry.updatedAt  : 0;
 
-                if (nasTime > localTime) {
-                    // NAS가 더 최신 → 로컬에 같은 파일 있는지 먼저 확인
+                // 같은 단말이 저장한 항목이면 cross-device 분기 건너뜀
+                String thisDeviceId = android.provider.Settings.Secure.getString(
+                        getContentResolver(), android.provider.Settings.Secure.ANDROID_ID);
+                boolean isSameDevice = nasEntry != null
+                        && nasEntry.deviceId != null
+                        && nasEntry.deviceId.equals(thisDeviceId);
+
+                if (nasTime > localTime && !isSameDevice) {
+                    // NAS가 더 최신 + 다른 단말 → 로컬에 같은 파일 있는지 먼저 확인
                     findLocalFileAndResume(nasEntry, localLast);
                 } else if (localLast != null) {
                     // 로컬이 최신 or NAS 항목 없음 → 기존 이어보기
