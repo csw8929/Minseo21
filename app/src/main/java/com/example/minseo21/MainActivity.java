@@ -69,6 +69,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     private static final String KEY_PLAYBACK_SPEED = "playback_speed";
 
     private NasSyncManager nasSyncManager;
+    private java.util.concurrent.Future<?> nasFlushing;
 
     private long pendingSeekMs       = -1;
     private int  pendingSubtitleId   = Integer.MIN_VALUE;
@@ -109,6 +110,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     private float zoomFactor = 1.0f;
 
     private final Runnable hideControls = () -> {
+        Log.d(TAG, "[UI] 컨트롤 hide");
         topBar.setVisibility(View.GONE);
         centerControls.setVisibility(View.GONE);
         controlsOverlay.setVisibility(View.GONE);
@@ -265,20 +267,25 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
      * - 로컬 파일: bucketDisplayName + "/" + name
      * - fallback: 파일명만
      */
+    /**
+     * NAS syncKey = 파일명만 (폴더 무관).
+     * A/B 단말이 같은 파일을 다른 폴더에서 재생할 수 있으므로, 크로스 디바이스 매칭은 파일명 기준.
+     */
     private String deriveSyncKey() {
         if (PlaylistHolder.playlist != null && PlaylistHolder.currentIndex >= 0) {
             VideoItem item = PlaylistHolder.playlist.get(PlaylistHolder.currentIndex);
-            if (item.nasPath != null) {
+            // NAS 파일: nasPath의 마지막 세그먼트 (파일명)
+            if (item.nasPath != null && !item.nasPath.isEmpty()) {
                 String[] parts = item.nasPath.split("/");
-                if (parts.length >= 2) return parts[parts.length - 2] + "/" + parts[parts.length - 1];
-                if (parts.length == 1) return parts[0];
+                String name = parts[parts.length - 1];
+                if (!name.isEmpty()) return name;
             }
-            if (item.bucketDisplayName != null && !item.bucketDisplayName.isEmpty()) {
-                return item.bucketDisplayName + "/" + item.name;
-            }
+            // 로컬 파일: name
             if (item.name != null && !item.name.isEmpty()) return item.name;
         }
-        return currentTitle != null ? currentTitle : "";
+        // Intent로 직접 열린 경우 → 파일 URI의 마지막 세그먼트
+        if (currentTitle != null && !currentTitle.isEmpty()) return currentTitle;
+        return "";
     }
 
     private void initPlayer(VLCVideoLayout videoLayout, Uri videoUri) {
@@ -565,6 +572,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
                 && PlaylistHolder.currentIndex < PlaylistHolder.playlist.size()) {
             nasPath = PlaylistHolder.playlist.get(PlaylistHolder.currentIndex).nasPath;
         }
+        Log.d(TAG, "[Save] pos=" + pos + "ms  key=" + currentSyncKey);
         nasSyncManager.savePosition(pp, currentSyncKey, nasPath);
     }
 
@@ -688,6 +696,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
                 break;
             case MediaPlayer.Event.Paused:
             case MediaPlayer.Event.Stopped:
+                Log.d(TAG, "[Player] " + (event.type == MediaPlayer.Event.Paused ? "일시정지" : "정지"));
                 btnPlayPause.setImageResource(android.R.drawable.ic_media_play);
                 handler.removeCallbacks(savePositionTask);
                 saveCurrentPosition();
@@ -1318,8 +1327,21 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     protected void onPause() {
         super.onPause();
         saveCurrentPosition();
-        nasSyncManager.flushToNas(); // 즉시 NAS 업로드 (배터리 방전 / 앱 종료 대비)
+        // onPause에서 flush 시작 → onStop에서 완료 대기 (앱 종료 전 NAS 저장 보장)
+        nasFlushing = dbExecutor.submit(nasSyncManager::flushToNasBlocking);
         if (mediaPlayer != null) mediaPlayer.pause();
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        // onPause에서 시작된 NAS flush가 완료될 때까지 최대 4초 대기 (앱 종료 전 보장)
+        if (nasFlushing != null && !nasFlushing.isDone()) {
+            try {
+                nasFlushing.get(4000, java.util.concurrent.TimeUnit.MILLISECONDS);
+            } catch (Exception ignored) {}
+            nasFlushing = null;
+        }
     }
 
     @Override

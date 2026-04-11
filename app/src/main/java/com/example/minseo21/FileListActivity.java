@@ -309,6 +309,10 @@ public class FileListActivity extends AppCompatActivity {
                 if (nasTime > localTime && !isSameDevice) {
                     // NAS가 더 최신 + 다른 단말 → 로컬에 같은 파일 있는지 먼저 확인
                     findLocalFileAndResume(nasEntry, localLast);
+                } else if (nasTime > localTime && isSameDevice) {
+                    // NAS가 더 최신 + 같은 단말 (앱 재설치 등으로 Room DB 초기화된 경우)
+                    // → NAS 위치 기준으로 이어보기 (nasEntry를 로컬 파일처럼 처리)
+                    findLocalFileAndResume(nasEntry, localLast);
                 } else if (localLast != null) {
                     // 로컬이 최신 or NAS 항목 없음 → 기존 이어보기
                     boolean isNas = DsFileApiClient.isNasUrl(localLast.uri);
