@@ -45,7 +45,8 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
 
     private static final int CONTROLS_HIDE_DELAY_MS = 3000;
     private static final String TAG = "SACH";
-    private static final long SAVE_INTERVAL_MS = 5_000;
+    private static final long SAVE_INTERVAL_MS     = 5_000;
+    private static final long NAS_FLUSH_INTERVAL_MS = 30_000;
 
     private LibVLC libVLC;
     private MediaPlayer mediaPlayer;
@@ -56,8 +57,10 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     private boolean rotationLocked = false;
 
     private String currentUriKey = null;
-    /** Room DB / NAS 위치 파일 키. NAS 파일은 canonical URL, 로컬은 currentUriKey 와 동일. */
+    /** Room DB 키. NAS 파일은 canonical URL, 로컬은 content:// URI 문자열. */
     private String currentDbKey  = null;
+    /** NAS 위치 캐시 키. "{폴더명}/{파일명}" 형태. */
+    private String currentSyncKey = null;
     private String currentTitle = null;
     private String currentBucketId = null; // 현재 폴더 ID
     private static final String PREFS_NAME    = "player_prefs";
@@ -123,6 +126,14 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         public void run() {
             saveCurrentPosition();
             handler.postDelayed(this, SAVE_INTERVAL_MS);
+        }
+    };
+
+    private final Runnable nasFlushTask = new Runnable() {
+        @Override
+        public void run() {
+            nasSyncManager.flushToNas();
+            handler.postDelayed(this, NAS_FLUSH_INTERVAL_MS);
         }
     };
 
@@ -248,9 +259,35 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         return DsFileApiClient.toCanonicalUrl(uri.toString());
     }
 
+    /**
+     * NAS 위치 캐시 키 생성: "{폴더명}/{파일명}"
+     * - NAS 파일: nasPath의 마지막 두 세그먼트 (/video/드라마/ep01.mkv → 드라마/ep01.mkv)
+     * - 로컬 파일: bucketDisplayName + "/" + name
+     * - fallback: 파일명만
+     */
+    private String deriveSyncKey() {
+        if (PlaylistHolder.playlist != null && PlaylistHolder.currentIndex >= 0) {
+            VideoItem item = PlaylistHolder.playlist.get(PlaylistHolder.currentIndex);
+            if (item.nasPath != null) {
+                String[] parts = item.nasPath.split("/");
+                if (parts.length >= 2) return parts[parts.length - 2] + "/" + parts[parts.length - 1];
+                if (parts.length == 1) return parts[0];
+            }
+            if (item.bucketDisplayName != null && !item.bucketDisplayName.isEmpty()) {
+                return item.bucketDisplayName + "/" + item.name;
+            }
+            if (item.name != null && !item.name.isEmpty()) return item.name;
+        }
+        return currentTitle != null ? currentTitle : "";
+    }
+
     private void initPlayer(VLCVideoLayout videoLayout, Uri videoUri) {
-        currentUriKey = videoUri.toString();
-        currentDbKey  = resolveDbKey(videoUri);
+        currentUriKey  = videoUri.toString();
+        currentDbKey   = resolveDbKey(videoUri);
+        currentSyncKey = deriveSyncKey();
+        // NAS flush 타이머 시작 (중복 제거 후 재등록)
+        handler.removeCallbacks(nasFlushTask);
+        handler.postDelayed(nasFlushTask, NAS_FLUSH_INTERVAL_MS);
 
         boolean isNetwork = "http".equals(videoUri.getScheme()) || "https".equals(videoUri.getScheme());
 
@@ -490,49 +527,27 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     }
 
     private void loadSavedPosition(String uriKey) {
-        // NAS URI이면 NasSyncManager (NAS + Room DB 병렬, 더 최신 쪽 사용)
-        if (DsFileApiClient.isNasUrl(uriKey)) {
-            nasSyncManager.loadPosition(uriKey, pos -> {
-                // 메인 스레드에서 호출됨 (두 번 호출될 수 있음: Room DB 먼저, NAS 나중)
-                if (pos == null) return;
-                if (pos.positionMs > 0) {
-                    Log.d(TAG, "[NAS] resume at " + pos.positionMs + "ms");
-                    if (tracksLogged && mediaPlayer != null) {
-                        mediaPlayer.setTime(pos.positionMs);
-                    } else {
-                        pendingSeekMs = pos.positionMs;
-                    }
+        // 모든 파일: NasSyncManager (Room DB + NAS 캐시 비교, 더 최신 쪽 사용)
+        // 콜백은 두 번 호출될 수 있음 — Room DB 먼저, NAS 캐시가 더 최신이면 이후 한 번 더
+        nasSyncManager.loadPosition(currentSyncKey, uriKey, pos -> {
+            if (pos == null) return;
+            if (pos.positionMs > 0) {
+                Log.d(TAG, "[Sync] resume at " + pos.positionMs + "ms (key=" + currentSyncKey + ")");
+                if (tracksLogged && mediaPlayer != null) {
+                    mediaPlayer.setTime(pos.positionMs);
+                } else {
+                    pendingSeekMs = pos.positionMs;
                 }
-                pendingSubtitleId = pos.subtitleTrackId;
-                pendingAudioId   = pos.audioTrackId;
-                if (tracksLogged) applyPendingSettings();
-            });
-            return;
-        }
-        // 로컬 파일: Room DB만 사용
-        dbExecutor.execute(() -> {
-            PlaybackPosition pos = PlaybackDatabase.getInstance(this)
-                    .playbackDao().getPosition(uriKey);
-            runOnUiThread(() -> {
-                if (pos == null) return;
-                if (pos.positionMs > 0) {
-                    Log.d(TAG, "[DB] resume at " + pos.positionMs + "ms");
-                    if (tracksLogged && mediaPlayer != null) {
-                        mediaPlayer.setTime(pos.positionMs);
-                    } else {
-                        pendingSeekMs = pos.positionMs;
-                    }
-                }
-                pendingSubtitleId = pos.subtitleTrackId;
-                pendingAudioId   = pos.audioTrackId;
-                if (tracksLogged) applyPendingSettings();
-            });
+            }
+            pendingSubtitleId = pos.subtitleTrackId;
+            pendingAudioId    = pos.audioTrackId;
+            if (tracksLogged) applyPendingSettings();
         });
     }
 
     private void saveCurrentPosition() {
         if (mediaPlayer == null || currentUriKey == null) return;
-        if (currentDbKey == null) return; // canonical 키 없으면 null 행 저장 방지
+        if (currentDbKey == null) return;
         long pos = mediaPlayer.getTime();
         if (pos <= 0) return;
         PlaybackPosition pp = new PlaybackPosition();
@@ -544,7 +559,13 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         pp.subtitleTrackId = currentSubtitleTrackId;
         pp.audioTrackId    = currentAudioTrackId;
         pp.screenMode      = -1;
-        nasSyncManager.savePosition(pp, pp.uri);
+        // nasPath: NAS 파일이면 저장 (cross-device resume 시 B 단말이 스트림 URL 재생성)
+        String nasPath = null;
+        if (PlaylistHolder.playlist != null && PlaylistHolder.currentIndex >= 0
+                && PlaylistHolder.currentIndex < PlaylistHolder.playlist.size()) {
+            nasPath = PlaylistHolder.playlist.get(PlaylistHolder.currentIndex).nasPath;
+        }
+        nasSyncManager.savePosition(pp, currentSyncKey, nasPath);
     }
 
     private void logTracks() {
@@ -775,7 +796,8 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             pfd = null;
         }
 
-        currentDbKey = item.canonicalUri != null ? item.canonicalUri : item.uri.toString();
+        currentDbKey   = item.canonicalUri != null ? item.canonicalUri : item.uri.toString();
+        currentSyncKey = deriveSyncKey();
         loadSavedPosition(currentDbKey);
 
         // TODO: 5G 환경에서 HLS 트랜스코딩 지원 예정 — 현재는 직접 스트리밍.
@@ -1296,6 +1318,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     protected void onPause() {
         super.onPause();
         saveCurrentPosition();
+        nasSyncManager.flushToNas(); // 즉시 NAS 업로드 (배터리 방전 / 앱 종료 대비)
         if (mediaPlayer != null) mediaPlayer.pause();
     }
 

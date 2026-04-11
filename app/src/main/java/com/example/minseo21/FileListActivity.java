@@ -10,10 +10,13 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.MediaStore;
+import android.util.Log;
 import android.view.View;
 import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import org.json.JSONObject;
 
 import android.app.Activity;
 import android.widget.ImageButton;
@@ -231,46 +234,144 @@ public class FileListActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * 앱 시작 시 이어보기 다이얼로그.
+     * 로컬 last_app_state 뿐 아니라 NAS 위치 캐시도 확인해서
+     * 다른 단말에서 재생 중이던 영상도 resume 제안.
+     */
     private void checkLastPlayback() {
         if (hasCheckedResumeThisSession) return;
         hasCheckedResumeThisSession = true;
+
         int lastState = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getInt(KEY_LAST_STATE, 0);
-        if (lastState != 1) return;
+        boolean hasLocalState = (lastState == 1);
+        boolean hasNasCreds   = nasCredStore.hasCredentials();
+
+        // 로컬 이력도 없고 NAS 인증도 없으면 패스
+        if (!hasLocalState && !hasNasCreds) return;
 
         dbExecutor.execute(() -> {
-            PlaybackPosition last = PlaybackDatabase.getInstance(this)
-                    .playbackDao().getLastPosition();
-            if (last == null || last.uri == null) return;
+            PlaybackPosition localLast = hasLocalState
+                    ? PlaybackDatabase.getInstance(this).playbackDao().getLastPosition()
+                    : null;
+            if (localLast != null && localLast.uri == null) localLast = null;
 
-            boolean isNas = DsFileApiClient.isNasUrl(last.uri);
-            runOnUiThread(() -> {
-                if (isNas) {
-                    // 인증 정보 없으면 스킵 (최초 설치 직후 등)
-                    if (!nasCredStore.hasCredentials()) return;
-                    if (nasSid != null) {
-                        // SID 이미 있음 (NAS 탭을 먼저 열었던 경우)
-                        showResumeDialog(last, DsFileApiClient.canonicalToStream(last.uri, nasSid));
-                    } else {
-                        // SID 없음 → 백그라운드 로그인 후 다이얼로그 표시
-                        DsFileApiClient.login(new DsFileApiClient.Callback<String>() {
-                            @Override public void onResult(String sid) {
-                                if (isFinishing() || isDestroyed()) return;
-                                nasSid = sid;
-                                showResumeDialog(last, DsFileApiClient.canonicalToStream(last.uri, sid));
-                            }
-                            @Override public void onError(String msg) {
-                                // 로그인 실패 → 이어보기 조용히 스킵
-                            }
-                        });
+            if (!hasNasCreds) {
+                // NAS 인증 정보 없음 → 로컬 이력만 표시
+                final PlaybackPosition ll = localLast;
+                if (ll != null) runOnUiThread(() -> showResumeDialog(ll, null));
+                return;
+            }
+
+            // NAS 인증 정보 있음 → SID 확보 후 positions 다운로드
+            final PlaybackPosition finalLocal = localLast;
+            String sid = nasSid != null ? nasSid : DsFileApiClient.getCachedSid();
+            if (sid != null) {
+                fetchNasAndShowResume(finalLocal, sid);
+            } else {
+                DsFileApiClient.login(new DsFileApiClient.Callback<String>() {
+                    @Override public void onResult(String newSid) {
+                        if (isFinishing() || isDestroyed()) return;
+                        nasSid = newSid;
+                        fetchNasAndShowResume(finalLocal, newSid);
                     }
-                } else {
-                    showResumeDialog(last, null);
-                }
-            });
+                    @Override public void onError(String msg) {
+                        // 로그인 실패 → 로컬 이력만
+                        if (finalLocal != null)
+                            runOnUiThread(() -> showResumeDialog(finalLocal, null));
+                    }
+                });
+            }
         });
     }
 
-    /** 이어보기 다이얼로그. nasStreamUrl이 null이면 로컬 파일로 취급. */
+    /**
+     * NAS positions 다운로드 후 로컬 이력과 비교해서 더 최신인 쪽으로 다이얼로그 표시.
+     * NAS가 더 최신 → 로컬에서 같은 파일 검색 후 resume 결정
+     * 로컬이 최신 or NAS 없음 → 기존 이어보기 다이얼로그
+     */
+    private void fetchNasAndShowResume(PlaybackPosition localLast, String sid) {
+        DsFileApiClient.downloadUserPositions(new DsFileApiClient.Callback<JSONObject>() {
+            @Override public void onResult(JSONObject positions) {
+                NasSyncManager.NasResumeEntry nasEntry =
+                        NasSyncManager.findMostRecentEntry(positions);
+
+                long localTime = (localLast != null) ? localLast.updatedAt : 0;
+                long nasTime   = (nasEntry  != null) ? nasEntry.updatedAt  : 0;
+
+                if (nasTime > localTime) {
+                    // NAS가 더 최신 → 로컬에 같은 파일 있는지 먼저 확인
+                    findLocalFileAndResume(nasEntry, localLast);
+                } else if (localLast != null) {
+                    // 로컬이 최신 or NAS 항목 없음 → 기존 이어보기
+                    boolean isNas = DsFileApiClient.isNasUrl(localLast.uri);
+                    String nasUrl = isNas
+                            ? DsFileApiClient.canonicalToStream(localLast.uri, sid)
+                            : null;
+                    runOnUiThread(() -> showResumeDialog(localLast, nasUrl));
+                }
+                // 둘 다 없으면 다이얼로그 없이 파일 리스트
+            }
+            @Override public void onError(String msg) {
+                // NAS 다운로드 실패 → 로컬 이력만
+                if (localLast != null)
+                    runOnUiThread(() -> showResumeDialog(localLast, null));
+            }
+        });
+    }
+
+    /**
+     * NAS 최신 항목 기준으로 로컬에서 같은 파일명을 검색하고 결과에 따라 분기.
+     *   - 로컬에 파일 있음 → cross-device resume 다이얼로그 → 로컬 재생
+     *   - 없고 localLast 있음 → 이전 로컬 마지막 이어보기 다이얼로그
+     *   - 둘 다 없음 → 다이얼로그 없이 파일 리스트
+     * downloadUserPositions 콜백은 메인 스레드이므로 MediaStore 검색은 dbExecutor로 위임.
+     */
+    private void findLocalFileAndResume(NasSyncManager.NasResumeEntry nasEntry,
+                                        PlaybackPosition localLast) {
+        dbExecutor.execute(() -> {
+            String fileName = nasEntry.fileName();
+            Uri localUri = null;
+            try (Cursor c = getContentResolver().query(
+                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                    new String[]{ MediaStore.Video.Media._ID },
+                    MediaStore.Video.Media.DISPLAY_NAME + " = ?",
+                    new String[]{ fileName }, null)) {
+                if (c != null && c.moveToFirst()) {
+                    localUri = ContentUris.withAppendedId(
+                            MediaStore.Video.Media.EXTERNAL_CONTENT_URI, c.getLong(0));
+                }
+            } catch (Exception e) {
+                Log.w("FileList", "로컬 파일 검색 오류: " + e.getMessage());
+            }
+
+            if (localUri != null) {
+                // 로컬에 파일 있음 → cross-device resume 다이얼로그
+                final Uri finalUri = localUri;
+                runOnUiThread(() -> showCrossDeviceResumeDialog(nasEntry.fileName(), finalUri));
+            } else if (localLast != null) {
+                // 로컬에 파일 없음 + 이전 로컬 이력 있음 → 이전 이어보기로 폴백
+                runOnUiThread(() -> showResumeDialog(localLast, null));
+            }
+            // 둘 다 없으면 → 파일 리스트 (아무것도 안 함)
+        });
+    }
+
+    /**
+     * Cross-device resume 다이얼로그.
+     * 로컬에서 같은 파일을 찾은 경우에만 호출됨 → 항상 로컬 재생.
+     */
+    private void showCrossDeviceResumeDialog(String fileName, Uri localUri) {
+        if (isFinishing() || isDestroyed()) return;
+        new AlertDialog.Builder(this)
+                .setTitle("이어서 볼까요?")
+                .setMessage("다른 단말에서 재생 중이던 영상입니다.\n\n" + fileName)
+                .setPositiveButton("예", (dialog, which) -> playVideo(localUri, fileName))
+                .setNegativeButton("아니오", null)
+                .show();
+    }
+
+    /** 이어보기 다이얼로그 (이 단말에서 마지막으로 재생하던 영상). nasStreamUrl이 null이면 로컬 파일로 취급. */
     private void showResumeDialog(PlaybackPosition last, String nasStreamUrl) {
         boolean isNas = nasStreamUrl != null;
         String playUri = isNas ? nasStreamUrl : last.uri;
@@ -282,7 +383,7 @@ public class FileListActivity extends AppCompatActivity {
                         + (last.name != null ? last.name : "알 수 없는 파일"))
                 .setPositiveButton("예", (dialog, which) -> {
                     if (!isNas && last.bucketId != null) {
-                        List<VideoItem> videos = queryVideosInBucket(last.bucketId);
+                        List<VideoItem> videos = queryVideosInBucket(last.bucketId, "");
                         if (!videos.isEmpty()) {
                             PlaylistHolder.playlist = videos;
                             int idx = -1;
@@ -293,7 +394,6 @@ public class FileListActivity extends AppCompatActivity {
                         }
                     }
                     if (isNas) {
-                        // NAS 탭으로 자동 전환
                         tabLayout.selectTab(tabLayout.getTabAt(TAB_NAS));
                     }
                     playVideo(Uri.parse(finalUri), last.name);
@@ -328,7 +428,7 @@ public class FileListActivity extends AppCompatActivity {
         showLocalItems(items, items.isEmpty() ? "동영상 폴더가 없습니다." : null);
     }
 
-    private List<VideoItem> queryVideosInBucket(String bucketId) {
+    private List<VideoItem> queryVideosInBucket(String bucketId, String bucketDisplayName) {
         String[] proj = { MediaStore.Video.Media._ID, MediaStore.Video.Media.DISPLAY_NAME,
                 MediaStore.Video.Media.SIZE, MediaStore.Video.Media.BUCKET_ID,
                 MediaStore.Video.Media.DATE_MODIFIED };
@@ -344,8 +444,8 @@ public class FileListActivity extends AppCompatActivity {
                 while (c.moveToNext()) {
                     Uri uri = ContentUris.withAppendedId(
                             MediaStore.Video.Media.EXTERNAL_CONTENT_URI, c.getLong(colId));
-                    items.add(VideoItem.video(c.getString(colName), bucketId, uri,
-                            c.getLong(colSize), c.getLong(colDate)));
+                    items.add(VideoItem.video(c.getString(colName), bucketId, bucketDisplayName,
+                            uri, c.getLong(colSize), c.getLong(colDate)));
                 }
             }
         }
@@ -359,7 +459,7 @@ public class FileListActivity extends AppCompatActivity {
     private void loadVideosInBucket(String bucketId, String bucketName) {
         currentBucketId = bucketId; currentBucketName = bucketName;
         tvPath.setText("내장저장공간 / " + bucketName);
-        currentVideoList = queryVideosInBucket(bucketId);
+        currentVideoList = queryVideosInBucket(bucketId, bucketName);
         showLocalItems(currentVideoList, currentVideoList.isEmpty() ? "동영상 파일이 없습니다." : null);
     }
 
