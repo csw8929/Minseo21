@@ -112,15 +112,25 @@ public class NasSyncManager {
      * SID 없으면 빈 캐시로 초기화 (로컬만 동작).
      */
     public void loadAllPositionsFromNas(Runnable onDone) {
-        if (!loading.compareAndSet(false, true)) return; // 중복 호출 방지
+        // 이미 로딩 중이면 onDone 드롭 방지: 캐시가 채워져 있으면 즉시 실행, 아니면 100ms 재시도
+        if (!loading.compareAndSet(false, true)) {
+            if (onDone != null) {
+                if (positionsCache != null) mainHandler.post(onDone);
+                else mainHandler.postDelayed(() -> loadAllPositionsFromNas(onDone), 100);
+            }
+            return;
+        }
+        final java.util.concurrent.atomic.AtomicBoolean fired = new java.util.concurrent.atomic.AtomicBoolean(false);
         DsFileApiClient.downloadUserPositions(new DsFileApiClient.Callback<JSONObject>() {
             @Override public void onResult(JSONObject positions) {
+                if (!fired.compareAndSet(false, true)) return; // 이중 콜백 방어
                 positionsCache = positions;
                 loading.set(false);
                 Log.d(TAG, "NAS 캐시 로드 완료: " + positions.length() + " 항목");
                 if (onDone != null) onDone.run();
             }
             @Override public void onError(String msg) {
+                if (!fired.compareAndSet(false, true)) return;
                 if (positionsCache == null) positionsCache = new JSONObject();
                 loading.set(false);
                 Log.d(TAG, "NAS 캐시 로드 실패 (로컬 모드): " + msg);

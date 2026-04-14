@@ -38,9 +38,15 @@ NAS 저장 키는 **파일명만** 사용한다 (폴더명 제외).
 }
 ```
 
-- `updatedAt`: 비교 기준. 두 항목이 충돌하면 더 큰 값이 이긴다.
-- `deviceId`: 저장한 단말의 `ANDROID_ID`. cross-device 판단에 사용.
-- `nasPath`: 선택 필드. NAS 파일이면 저장, 로컬 파일이면 없음.
+| 필드 | 타입 | 필수 | 설명 |
+|------|------|------|------|
+| `positionMs` | long | 필수 | 마지막 재생 위치 (밀리초). 다음 실행 시 이 위치로 seek한다. |
+| `audioTrackId` | int | 필수 | 마지막으로 선택한 오디오 트랙 ID. VLC 트랙 ID 기준. `-1`은 비활성. 다른 단말에서 resume 시 무시된다. |
+| `subtitleTrackId` | int | 필수 | 마지막으로 선택한 자막 트랙 ID. VLC 트랙 ID 기준. `-1`은 자막 끔. 다른 단말에서 resume 시 무시된다. |
+| `screenMode` | int | 필수 | 화면 맞춤 모드. `0` = 기본, `1` = 가로채움, `2` = 세로채움. 다른 단말에서 resume 시 무시된다. |
+| `updatedAt` | long | 필수 | 저장 시각 (Unix epoch ms). 두 단말의 항목이 충돌하면 이 값이 더 큰 쪽을 채택한다. 병합의 유일한 기준. |
+| `deviceId` | String | 필수 | 저장한 단말의 `ANDROID_ID` (Settings.Secure). 같은 단말이 저장한 항목인지 판별해 오디오/자막/화면 설정 복원 여부를 결정한다. |
+| `nasPath` | String | 선택 | NAS 파일 경로 (예: `/video/드라마/파일.mkv`). NAS 파일 재생 시에만 존재. 로컬 파일은 이 필드 없음. 향후 다른 단말이 NAS에서 직접 재생할 때 스트림 URL 재생성에 사용 예정. |
 
 ### NAS 플러시 흐름
 

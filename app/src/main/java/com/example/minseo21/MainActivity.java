@@ -115,12 +115,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         centerControls.setVisibility(View.GONE);
         controlsOverlay.setVisibility(View.GONE);
         controlsVisible = false;
-        // 컨트롤 숨김 시 화면잠금 자동 해제
-        if (rotationLocked) {
-            rotationLocked = false;
-            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR);
-            btnRotationLock.setBackgroundResource(R.drawable.bg_blue_circle);
-        }
+        // 회전 잠금 상태는 컨트롤 숨김과 무관하게 유지
     };
 
     private final Runnable savePositionTask = new Runnable() {
@@ -624,6 +619,11 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
                 media = new Media(libVLC, pfd.getFileDescriptor());
             } catch (Exception e) {
                 Log.e(TAG, "content:// open failed", e);
+                // PFD 누수 방지: new Media() 가 throw 해도 pfd 는 열려 있을 수 있음
+                if (pfd != null) {
+                    try { pfd.close(); } catch (Exception ignored) {}
+                    pfd = null;
+                }
                 return null;
             }
         } else {
@@ -671,7 +671,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             }
             case MediaPlayer.Event.Playing:
                 loadingBar.setVisibility(View.GONE);
-                btnPlayPause.setImageResource(android.R.drawable.ic_media_pause);
+                btnPlayPause.setImageResource(R.drawable.ic_pause);
                 if (!tracksLogged) {
                     tracksLogged = true;
                     logTracks();
@@ -697,13 +697,13 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             case MediaPlayer.Event.Paused:
             case MediaPlayer.Event.Stopped:
                 Log.d(TAG, "[Player] " + (event.type == MediaPlayer.Event.Paused ? "일시정지" : "정지"));
-                btnPlayPause.setImageResource(android.R.drawable.ic_media_play);
+                btnPlayPause.setImageResource(R.drawable.ic_play);
                 handler.removeCallbacks(savePositionTask);
                 saveCurrentPosition();
                 showControls();
                 break;
             case MediaPlayer.Event.EndReached:
-                btnPlayPause.setImageResource(android.R.drawable.ic_media_play);
+                btnPlayPause.setImageResource(R.drawable.ic_play);
                 handler.removeCallbacks(savePositionTask);
                 if (currentUriKey != null) {
                     final String key = currentUriKey;
@@ -959,15 +959,13 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         handler.postDelayed(hideControls, CONTROLS_HIDE_DELAY_MS);
     }
 
-    private static final float[] SPEED_VALUES = {0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f};
-    private static final String[] SPEED_LABELS = {"0.5×", "0.75×", "1.0×", "1.25×", "1.5×", "2.0×"};
+    private static final float[] SPEED_VALUES = {0.75f, 1.0f, 1.25f, 1.5f};
+    private static final String[] SPEED_LABELS = {"0.75×", "1.0×", "1.25×", "1.5×"};
 
     private String formatSpeed(float speed) {
-        if (speed == 0.5f)  return "0.5×";
         if (speed == 0.75f) return "0.75×";
         if (speed == 1.25f) return "1.25×";
         if (speed == 1.5f)  return "1.5×";
-        if (speed == 2.0f)  return "2.0×";
         return "1.0×";
     }
 

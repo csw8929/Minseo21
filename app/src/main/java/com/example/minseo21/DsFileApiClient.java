@@ -75,6 +75,7 @@ public class DsFileApiClient {
         cfgPosDir   = posDir;
         cachedSid    = null;
         resolvedBase = null;
+        cfgPortalCookie = ""; // 계정이 바뀌면 이전 포털 쿠키도 무효
         Log.i(TAG, "NAS 인증 정보 적용 완료 (baseUrl=" + cfgBaseUrl + ")");
     }
 
@@ -451,6 +452,8 @@ public class DsFileApiClient {
         } catch (Exception e) {
             Log.w(TAG, "reLoginSync 실패: " + e.getMessage());
         }
+        // 재로그인 실패 → 만료된 SID를 계속 들고 있으면 후속 호출도 모두 105/106으로 터지므로 클리어
+        cachedSid = null;
         return null;
     }
 
@@ -1715,7 +1718,6 @@ public class DsFileApiClient {
             conn.setRequestMethod("GET");
             conn.setInstanceFollowRedirects(false);
             int code = conn.getResponseCode();
-            Log.d(TAG, "probe " + baseUrl + " → HTTP " + code);
             if (code == 200) {
                 InputStream is = conn.getInputStream();
                 byte[] buf = new byte[64];
@@ -1727,8 +1729,8 @@ public class DsFileApiClient {
                 }
             }
             conn.disconnect();
-        } catch (Exception e) {
-            Log.d(TAG, "probe fail " + baseUrl + ": " + e.getMessage());
+        } catch (Exception ignored) {
+            // probe 실패는 parallel 탐색에서 정상 — 최종 성공/실패만 상위에서 로그
         }
         return false;
     }

@@ -13,6 +13,7 @@ import android.provider.MediaStore;
 import android.util.Log;
 import android.view.View;
 import android.widget.Button;
+import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -38,8 +39,11 @@ import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import android.os.Handler;
+import android.os.Looper;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -68,6 +72,9 @@ public class FileListActivity extends AppCompatActivity {
     private String nasSid = null;
     private final Deque<String> nasPathStack = new ArrayDeque<>();
     private NasCredentialStore nasCredStore;
+    private ProgressBar pbResumeCheck;
+    private final Handler resumeTimeoutHandler = new Handler(Looper.getMainLooper());
+    private final AtomicBoolean resumeCheckCompleted = new AtomicBoolean(false);
 
     // ── 탭 ──────────────────────────────────────────────────────────────────
     private TabLayout tabLayout;
@@ -132,11 +139,17 @@ public class FileListActivity extends AppCompatActivity {
         tvNasError     = findViewById(R.id.tvNasError);
         rvNas          = findViewById(R.id.rvNas);
         tabLayout      = findViewById(R.id.tabLayout);
-        btnNasSettings = findViewById(R.id.btnNasSettings);
+        btnNasSettings  = findViewById(R.id.btnNasSettings);
+        pbResumeCheck   = findViewById(R.id.pbResumeCheck);
 
         // NAS 인증 정보 초기화 (저장된 값 우선, 없으면 DsFileConfig fallback)
         nasCredStore = new NasCredentialStore(this);
         DsFileApiClient.init(nasCredStore);
+
+        // NAS 인증 정보 있으면 즉시 스피너 표시 (첫 프레임 렌더 전에 설정)
+        if (nasCredStore.hasCredentials()) {
+            pbResumeCheck.setVisibility(View.VISIBLE);
+        }
 
         btnNasSettings.setOnClickListener(v -> {
             Intent intent = new Intent(this, NasSetupActivity.class);
@@ -248,7 +261,25 @@ public class FileListActivity extends AppCompatActivity {
         boolean hasNasCreds   = nasCredStore.hasCredentials();
 
         // 로컬 이력도 없고 NAS 인증도 없으면 패스
-        if (!hasLocalState && !hasNasCreds) return;
+        if (!hasLocalState && !hasNasCreds) {
+            hideResumeSpinner();
+            return;
+        }
+
+        if (hasNasCreds) {
+            // 5초 타임아웃: NAS 응답 없으면 로컬 이력으로 폴백
+            resumeTimeoutHandler.postDelayed(() -> {
+                if (!resumeCheckCompleted.getAndSet(true)) {
+                    hideResumeSpinner();
+                    dbExecutor.execute(() -> {
+                        PlaybackPosition local = PlaybackDatabase.getInstance(this)
+                                .playbackDao().getLastPosition();
+                        if (local != null && local.uri != null)
+                            runOnUiThread(() -> showResumeDialog(local, null));
+                    });
+                }
+            }, 5000);
+        }
 
         dbExecutor.execute(() -> {
             PlaybackPosition localLast = hasLocalState
@@ -260,6 +291,7 @@ public class FileListActivity extends AppCompatActivity {
                 // NAS 인증 정보 없음 → 로컬 이력만 표시
                 final PlaybackPosition ll = localLast;
                 if (ll != null) runOnUiThread(() -> showResumeDialog(ll, null));
+                else runOnUiThread(this::hideResumeSpinner);
                 return;
             }
 
@@ -279,6 +311,8 @@ public class FileListActivity extends AppCompatActivity {
                         // 로그인 실패 → 로컬 이력만
                         if (finalLocal != null)
                             runOnUiThread(() -> showResumeDialog(finalLocal, null));
+                        else
+                            runOnUiThread(FileListActivity.this::hideResumeSpinner);
                     }
                 });
             }
@@ -311,7 +345,6 @@ public class FileListActivity extends AppCompatActivity {
                     findLocalFileAndResume(nasEntry, localLast);
                 } else if (nasTime > localTime && isSameDevice) {
                     // NAS가 더 최신 + 같은 단말 (앱 재설치 등으로 Room DB 초기화된 경우)
-                    // → NAS 위치 기준으로 이어보기 (nasEntry를 로컬 파일처럼 처리)
                     findLocalFileAndResume(nasEntry, localLast);
                 } else if (localLast != null) {
                     // 로컬이 최신 or NAS 항목 없음 → 기존 이어보기
@@ -320,13 +353,17 @@ public class FileListActivity extends AppCompatActivity {
                             ? DsFileApiClient.canonicalToStream(localLast.uri, sid)
                             : null;
                     runOnUiThread(() -> showResumeDialog(localLast, nasUrl));
+                } else {
+                    // 둘 다 없으면 다이얼로그 없이 파일 리스트
+                    runOnUiThread(FileListActivity.this::hideResumeSpinner);
                 }
-                // 둘 다 없으면 다이얼로그 없이 파일 리스트
             }
             @Override public void onError(String msg) {
                 // NAS 다운로드 실패 → 로컬 이력만
                 if (localLast != null)
                     runOnUiThread(() -> showResumeDialog(localLast, null));
+                else
+                    runOnUiThread(FileListActivity.this::hideResumeSpinner);
             }
         });
     }
@@ -363,8 +400,10 @@ public class FileListActivity extends AppCompatActivity {
             } else if (localLast != null) {
                 // 로컬에 파일 없음 + 이전 로컬 이력 있음 → 이전 이어보기로 폴백
                 runOnUiThread(() -> showResumeDialog(localLast, null));
+            } else {
+                // 둘 다 없으면 → 파일 리스트
+                runOnUiThread(FileListActivity.this::hideResumeSpinner);
             }
-            // 둘 다 없으면 → 파일 리스트 (아무것도 안 함)
         });
     }
 
@@ -374,6 +413,7 @@ public class FileListActivity extends AppCompatActivity {
      */
     private void showCrossDeviceResumeDialog(String fileName, Uri localUri) {
         if (isFinishing() || isDestroyed()) return;
+        hideResumeSpinner();
         new AlertDialog.Builder(this)
                 .setTitle("이어서 볼까요?")
                 .setMessage("다른 단말에서 재생 중이던 영상입니다.\n\n" + fileName)
@@ -384,6 +424,7 @@ public class FileListActivity extends AppCompatActivity {
 
     /** 이어보기 다이얼로그 (이 단말에서 마지막으로 재생하던 영상). nasStreamUrl이 null이면 로컬 파일로 취급. */
     private void showResumeDialog(PlaybackPosition last, String nasStreamUrl) {
+        hideResumeSpinner();
         boolean isNas = nasStreamUrl != null;
         String playUri = isNas ? nasStreamUrl : last.uri;
         final String finalUri = playUri;
@@ -634,6 +675,12 @@ public class FileListActivity extends AppCompatActivity {
                 .replace("/", " / ")
                 .replaceAll("^ / ", "");
         tvPath.setText(path.isEmpty() ? "NAS" : "NAS" + path);
+    }
+
+    private void hideResumeSpinner() {
+        resumeCheckCompleted.set(true);
+        resumeTimeoutHandler.removeCallbacksAndMessages(null);
+        if (pbResumeCheck != null) pbResumeCheck.setVisibility(View.GONE);
     }
 
     // ── 공통 ─────────────────────────────────────────────────────────────────
