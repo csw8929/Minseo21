@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Minseo2 (app name: "삿치") is an Android video player app built with Java and libVLC. It provides a file browser for on-device videos and a full-featured player supporting local files and network streams (HTTP/HTTPS/HLS).
+Minseo21 (app name: "삿치") is an Android video player app built with Java and libVLC. It provides a file browser for on-device videos and a full-featured player supporting local files and network streams (HTTP/HTTPS/HLS).
 
 ## Build Commands
 
 ```bash
-./gradlew assembleDebug          # Build debug APK (output: app/build/outputs/apk/debug/Minseo2.apk)
+./gradlew assembleDebug          # Build debug APK (output: app/build/outputs/apk/debug/Minseo21.apk)
 ./gradlew assembleRelease        # Build release APK
 ./gradlew test                   # Run unit tests
 ./gradlew connectedAndroidTest   # Run instrumented tests on connected device
@@ -49,7 +49,7 @@ Minseo2 (app name: "삿치") is an Android video player app built with Java and 
 ## Important Notes
 
 - **MainActivity is ~10,700 lines.** When editing, read only the relevant section using line offsets rather than the entire file.
-- **Package:** `com.example.minseo2`
+- **Package:** `com.example.minseo21`
 - **External intent handling:** MainActivity registers as a viewer for `video/*` MIME types, HTTP/HTTPS streams, and HLS manifests. It also handles specific file extensions (.mp4, .mkv, .avi, .mov, .wmv, .ts, .m4v, .3gp, .webm, .flv, .m3u8) — see `AndroidManifest.xml`.
 - **Subtitle formats:** External subtitle detection supports `.smi`, `.srt`, `.ass`, `.ssa` files alongside the video file.
 - **Permissions:** `READ_EXTERNAL_STORAGE` (≤SDK 32) / `READ_MEDIA_VIDEO` (≥SDK 33), `INTERNET`. Cleartext traffic is enabled for network streaming.
