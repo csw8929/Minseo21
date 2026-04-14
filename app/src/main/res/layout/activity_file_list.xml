@@ -34,6 +34,15 @@
             android:ellipsize="start"
             android:singleLine="true" />
 
+        <!-- NAS resume 확인 중 스피너 (startup checkLastPlayback 동안만 표시) -->
+        <ProgressBar
+            android:id="@+id/pbResumeCheck"
+            style="?android:attr/progressBarStyleSmall"
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:layout_marginEnd="8dp"
+            android:visibility="gone" />
+
         <!-- NAS 설정 버튼 (NAS 탭일 때만 표시) -->
         <ImageButton
             android:id="@+id/btnNasSettings"
