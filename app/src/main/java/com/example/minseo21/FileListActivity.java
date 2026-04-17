@@ -405,7 +405,7 @@ public class FileListActivity extends AppCompatActivity {
         hideResumeSpinner();
         new AlertDialog.Builder(this)
                 .setTitle("이어서 볼까요?")
-                .setMessage("다른 단말에서 재생 중이던 영상입니다.\n\n" + fileName)
+                .setMessage("다른 단말에서 재생 중이던 영상입니다.\n[로컬 파일로 재생]\n\n" + fileName)
                 .setPositiveButton("예", (dialog, which) -> playVideo(localUri, fileName))
                 .setNegativeButton("아니오", null)
                 .show();
@@ -420,7 +420,9 @@ public class FileListActivity extends AppCompatActivity {
 
         new AlertDialog.Builder(this)
                 .setTitle("재생할까요?")
-                .setMessage("마지막으로 재생하던 영상을 이어서 봅니다.\n\n"
+                .setMessage("마지막으로 재생하던 영상을 이어서 봅니다.\n"
+                        + (isNas ? "[NAS에서 스트리밍]" : "[로컬 파일로 재생]")
+                        + "\n\n"
                         + (last.name != null ? last.name : "알 수 없는 파일"))
                 .setPositiveButton("예", (dialog, which) -> {
                     if (!isNas && last.bucketId != null) {
