@@ -22,7 +22,6 @@ public class NasCredentialStore {
     static final String KEY_PASS          = "pass";
     static final String KEY_BASE_PATH     = "base_path";
     static final String KEY_POS_DIR       = "pos_dir";
-    static final String KEY_PORTAL_COOKIE = "portal_cookie";
 
     private final SharedPreferences prefs;
 
@@ -88,17 +87,6 @@ public class NasCredentialStore {
     /** 이전 버전 호환 — basePath/posDir 없이 저장 (기본값 유지). */
     public void save(String baseUrl, String lanUrl, String user, String pass) {
         save(baseUrl, lanUrl, user, pass, getCustomBasePath(), getCustomPosDir());
-    }
-
-    /** QuickConnect 포털 세션 쿠키 (_SSID 포함 전체 쿠키 문자열). */
-    public String getPortalCookie() { return prefs.getString(KEY_PORTAL_COOKIE, ""); }
-
-    public void savePortalCookie(String cookie) {
-        prefs.edit().putString(KEY_PORTAL_COOKIE, cookie).apply();
-    }
-
-    public void clearPortalCookie() {
-        prefs.edit().remove(KEY_PORTAL_COOKIE).apply();
     }
 
     public void clear() {

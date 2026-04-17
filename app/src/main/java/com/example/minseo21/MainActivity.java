@@ -628,13 +628,6 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             }
         } else {
             media = new Media(libVLC, uri);
-            // 포털 모드(QuickConnect + _SSID 쿠키)이면 libVLC HTTP 요청에 쿠키 헤더 추가
-            String cookieHeader = DsFileApiClient.getStreamCookieHeader();
-            if (cookieHeader != null && !cookieHeader.isEmpty()
-                    && ("http".equals(scheme) || "https".equals(scheme))) {
-                media.addOption(":http-extra-headers=Cookie: " + cookieHeader + "\r\n");
-                Log.d("NAS", "libVLC 쿠키 헤더 설정: " + cookieHeader.substring(0, Math.min(40, cookieHeader.length())));
-            }
         }
         return media;
     }

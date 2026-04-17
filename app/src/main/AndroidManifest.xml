@@ -214,12 +214,6 @@
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
 
-        <!-- QuickConnect 포털 WebView 로그인 (_SSID 쿠키 획득) -->
-        <activity
-            android:name=".PortalLoginActivity"
-            android:exported="false"
-            android:configChanges="orientation|screenSize|keyboardHidden" />
-
     </application>
 
 </manifest>
