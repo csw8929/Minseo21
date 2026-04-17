@@ -134,6 +134,7 @@ public class FileListActivity extends AppCompatActivity {
         // NAS 인증 정보 초기화 (저장된 값 우선, 없으면 DsFileConfig fallback)
         nasCredStore = new NasCredentialStore(this);
         DsFileApiClient.init(nasCredStore);
+        DsFileApiClient.startNetworkMonitoring(this);
 
         // NAS 인증 정보 있으면 즉시 스피너 표시 (첫 프레임 렌더 전에 설정)
         if (nasCredStore.hasCredentials()) {
@@ -438,8 +439,22 @@ public class FileListActivity extends AppCompatActivity {
                     }
                     if (isNas) {
                         tabLayout.selectTab(tabLayout.getTabAt(TAB_NAS));
+                        // HLS 경로용: PlaylistHolder 에 단일 아이템 구성 (nasPath 전달)
+                        String nasPath = Uri.parse(finalUri).getQueryParameter("path");
+                        if (nasPath != null) {
+                            VideoItem vi = VideoItem.nasFileWithStream(
+                                    last.name != null ? last.name : "",
+                                    nasPath, finalUri, last.uri);
+                            List<VideoItem> pl = new ArrayList<>();
+                            pl.add(vi);
+                            PlaylistHolder.playlist = pl;
+                            PlaylistHolder.currentIndex = 0;
+                        }
+                        boolean useTranscode = !DsFileApiClient.isWifi(FileListActivity.this);
+                        playNasVideo(Uri.parse(finalUri), last.name, useTranscode);
+                    } else {
+                        playVideo(Uri.parse(finalUri), last.name);
                     }
-                    playVideo(Uri.parse(finalUri), last.name);
                 })
                 .setNegativeButton("아니오", (d, w) ->
                         getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
@@ -622,9 +637,19 @@ public class FileListActivity extends AppCompatActivity {
             final int finalIdx = targetIdx;
             final String directUrl = DsFileApiClient.getStreamUrl(item.nasPath, nasSid);
 
-            // TODO: 5G 환경에서 HLS 트랜스코딩 지원 예정 — 현재는 직접 스트리밍.
-            playVideo(Uri.parse(directUrl), item.name);
+            // 셀룰러(5G/LTE) 환경에서는 HLS 트랜스코딩 경로 사용
+            boolean useTranscode = !DsFileApiClient.isWifi(this);
+            playNasVideo(Uri.parse(directUrl), item.name, useTranscode);
         }
+    }
+
+    private void playNasVideo(Uri uri, String title, boolean useTranscode) {
+        Intent intent = new Intent(this, MainActivity.class);
+        intent.setAction(Intent.ACTION_VIEW);
+        intent.setData(uri);
+        intent.putExtra("title", title);
+        intent.putExtra("useTranscode", useTranscode);
+        startActivity(intent);
     }
 
     /** 파일 목록 뷰 다시 표시 (HLS 로딩 완료/실패 후 호출) */

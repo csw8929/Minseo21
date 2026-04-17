@@ -1,5 +1,8 @@
 package com.example.minseo21;
 
+import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.Network;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
@@ -20,10 +23,13 @@ import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -47,6 +53,8 @@ public class DsFileApiClient {
 
     private static volatile String cachedSid     = null;
     private static volatile String resolvedBase  = null; // QuickConnect 해석 결과 캐시
+    private static final AtomicBoolean networkMonitorStarted = new AtomicBoolean(false);
+    private static volatile Network lastKnownNetwork = null;
     private static final ExecutorService executor = Executors.newSingleThreadExecutor();
     private static final Handler mainHandler = new Handler(Looper.getMainLooper());
 
@@ -74,6 +82,7 @@ public class DsFileApiClient {
         cfgPosDir   = posDir;
         cachedSid    = null;
         resolvedBase = null;
+        fileIdCache.clear();
         Log.i(TAG, "NAS 인증 정보 적용 완료 (baseUrl=" + cfgBaseUrl + ")");
     }
 
@@ -91,6 +100,41 @@ public class DsFileApiClient {
 
     public static String getBasePath() { return cfgBasePath; }
 
+    /**
+     * 네트워크 전환(5G↔WiFi) 감지하여 resolvedBase / SID 캐시 무효화.
+     * 앱 시작 시 1회만 등록되며 이후 안전하게 재호출 가능.
+     */
+    public static void startNetworkMonitoring(Context ctx) {
+        if (!networkMonitorStarted.compareAndSet(false, true)) return;
+        ConnectivityManager cm = (ConnectivityManager) ctx.getApplicationContext()
+                .getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm == null) {
+            Log.w(TAG, "ConnectivityManager null — 네트워크 모니터링 비활성");
+            return;
+        }
+        try {
+            cm.registerDefaultNetworkCallback(new ConnectivityManager.NetworkCallback() {
+                @Override public void onAvailable(Network network) {
+                    if (lastKnownNetwork != null && !lastKnownNetwork.equals(network)) {
+                        Log.i(TAG, "네트워크 전환 감지 → resolvedBase/SID 캐시 초기화");
+                        resolvedBase = null;
+                        cachedSid = null;
+                    }
+                    lastKnownNetwork = network;
+                }
+                @Override public void onLost(Network network) {
+                    Log.i(TAG, "네트워크 끊김 → 캐시 초기화");
+                    resolvedBase = null;
+                    cachedSid = null;
+                    lastKnownNetwork = null;
+                }
+            });
+            Log.i(TAG, "startNetworkMonitoring OK");
+        } catch (Exception e) {
+            networkMonitorStarted.set(false);
+            Log.w(TAG, "startNetworkMonitoring 실패: " + e.getMessage());
+        }
+    }
 
     public interface Callback<T> {
         void onResult(T result);
@@ -306,9 +350,234 @@ public class DsFileApiClient {
         return null;
     }
 
-    // TODO: HLS 트랜스코딩 (SYNO.VideoStation2.Streaming) — 추후 구현 예정.
-    // QuickConnect 릴레이 환경에서 Streaming API error 120이 반환되어 현재 미지원.
-    // 구현 시 참고: VideoStation2.Streaming.open, stream_id → m3u8 URL 구성.
+    // ── HLS 트랜스코딩 (SYNO.VideoStation.Streaming v2, legacy vtestreaming.cgi) ──
+
+    /** 트랜스코딩 세션 핸들. close 호출에 필요한 정보를 보관. */
+    public static class TranscodeSession {
+        public final String streamId;
+        public final String hlsUrl;
+        public final int fileId;
+        public final String format;
+        TranscodeSession(String streamId, String hlsUrl, int fileId, String format) {
+            this.streamId = streamId;
+            this.hlsUrl = hlsUrl;
+            this.fileId = fileId;
+            this.format = format;
+        }
+    }
+
+    /** sharepath(/video/...) → Video Station file_id 캐시. init() 호출 시 클리어. */
+    private static final Map<String, Integer> fileIdCache = new ConcurrentHashMap<>();
+
+    /**
+     * NAS 공유 경로(/video/…)에 해당하는 Video Station file_id 조회.
+     * Movie.list 페이징 → TVShow/Episode.list 폴백 순서로 매칭.
+     * 성공 시 fileIdCache 에 저장하여 동일 경로 재조회 방지.
+     */
+    public static void findFileIdForSharePath(String sharePath, Callback<Integer> cb) {
+        if (sharePath == null || sharePath.isEmpty()) {
+            mainHandler.post(() -> cb.onError("sharePath 없음"));
+            return;
+        }
+        Integer cached = fileIdCache.get(sharePath);
+        if (cached != null) {
+            mainHandler.post(() -> cb.onResult(cached));
+            return;
+        }
+        executor.execute(() -> {
+            try {
+                Integer fid = findFileIdSync(sharePath, false);
+                if (fid != null && fid > 0) {
+                    fileIdCache.put(sharePath, fid);
+                    mainHandler.post(() -> cb.onResult(fid));
+                } else {
+                    mainHandler.post(() -> cb.onError("file_id 미발견: " + sharePath));
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "findFileId exception", e);
+                mainHandler.post(() -> cb.onError("file_id 조회 오류: " + e.getMessage()));
+            }
+        });
+    }
+
+    private static Integer findFileIdSync(String sharePath, boolean isRetry) throws Exception {
+        String sid = cachedSid;
+        if (sid == null) {
+            sid = reLoginSync();
+            if (sid == null) return null;
+        }
+        String base = apiBase();
+        String addFile = URLEncoder.encode("[\"file\"]", "UTF-8");
+
+        // 1. Movie.list 페이지네이션
+        int offset = 0;
+        final int limit = 500;
+        while (true) {
+            String url = base + "/webapi/entry.cgi"
+                    + "?api=SYNO.VideoStation2.Movie&method=list&version=1"
+                    + "&library_id=0&additional=" + addFile
+                    + "&limit=" + limit + "&offset=" + offset
+                    + "&_sid=" + sid;
+            String body = httpGet(url);
+            JSONObject json = new JSONObject(body);
+            if (!json.optBoolean("success", false)) {
+                int code = json.optJSONObject("error") != null
+                        ? json.getJSONObject("error").optInt("code", -1) : -1;
+                if ((code == 105 || code == 106) && !isRetry) {
+                    String newSid = reLoginSync();
+                    if (newSid != null) return findFileIdSync(sharePath, true);
+                }
+                Log.w(TAG, "Movie.list 실패 code=" + code + " → TVShow 폴백");
+                break;
+            }
+            JSONObject data = json.getJSONObject("data");
+            int total = data.optInt("total", 0);
+            JSONArray arr = data.optJSONArray("movie");
+            if (arr == null) break;
+            Integer hit = matchSharepath(arr, sharePath);
+            if (hit != null) return hit;
+            if (arr.length() == 0) break;
+            offset += arr.length();
+            if (offset >= total) break;
+        }
+
+        // 2. TVShow → Episode.list 폴백
+        String tvUrl = base + "/webapi/entry.cgi"
+                + "?api=SYNO.VideoStation2.TVShow&method=list&version=1"
+                + "&library_id=0&limit=500&_sid=" + sid;
+        String tvBody = httpGet(tvUrl);
+        JSONObject tvJson = new JSONObject(tvBody);
+        if (!tvJson.optBoolean("success", false)) return null;
+        JSONArray shows = tvJson.getJSONObject("data").optJSONArray("tvshow");
+        if (shows == null) return null;
+        for (int i = 0; i < shows.length(); i++) {
+            int showId = shows.getJSONObject(i).optInt("id", -1);
+            if (showId < 0) continue;
+            int epOffset = 0;
+            while (true) {
+                String epUrl = base + "/webapi/entry.cgi"
+                        + "?api=SYNO.VideoStation2.TVShowEpisode&method=list&version=1"
+                        + "&tvshow_id=" + showId
+                        + "&additional=" + addFile
+                        + "&limit=" + limit + "&offset=" + epOffset
+                        + "&_sid=" + sid;
+                String epBody = httpGet(epUrl);
+                JSONObject epJson = new JSONObject(epBody);
+                if (!epJson.optBoolean("success", false)) break;
+                JSONObject epData = epJson.getJSONObject("data");
+                int epTotal = epData.optInt("total", 0);
+                JSONArray eps = epData.optJSONArray("episode");
+                if (eps == null || eps.length() == 0) break;
+                Integer hit = matchSharepath(eps, sharePath);
+                if (hit != null) return hit;
+                epOffset += eps.length();
+                if (epOffset >= epTotal) break;
+            }
+        }
+        return null;
+    }
+
+    /** Movie/Episode 배열에서 additional.file[].sharepath == target 인 항목의 file id 반환. */
+    private static Integer matchSharepath(JSONArray arr, String target) {
+        for (int i = 0; i < arr.length(); i++) {
+            JSONObject m = arr.optJSONObject(i);
+            if (m == null) continue;
+            JSONObject add = m.optJSONObject("additional");
+            if (add == null) continue;
+            JSONArray files = add.optJSONArray("file");
+            if (files == null) continue;
+            for (int j = 0; j < files.length(); j++) {
+                JSONObject f = files.optJSONObject(j);
+                if (f == null) continue;
+                String sp = f.optString("sharepath", "");
+                if (!sp.isEmpty() && sp.equals(target)) {
+                    int id = f.optInt("id", -1);
+                    if (id > 0) return id;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * HLS 트랜스코딩 세션 오픈. 성공 시 TranscodeSession(streamId+hlsUrl) 반환.
+     * 호출 측은 재생 종료/전환 시 closeTranscodeStream 반드시 호출 (NAS ffmpeg 누수 방지).
+     */
+    public static void openTranscodeStream(int fileId, String format, Callback<TranscodeSession> cb) {
+        final String fmt = (format == null || format.isEmpty()) ? "hls" : format;
+        executor.execute(() -> {
+            String sid = cachedSid;
+            if (sid == null) {
+                sid = reLoginSync();
+                if (sid == null) {
+                    mainHandler.post(() -> cb.onError("세션 없음"));
+                    return;
+                }
+            }
+            try {
+                String base = apiBase();
+                String acceptFormat;
+                try {
+                    acceptFormat = URLEncoder.encode("hls_remux,hls,raw", "UTF-8");
+                } catch (Exception e) {
+                    acceptFormat = "hls_remux%2Chls%2Craw";
+                }
+                String openUrl = base + "/webapi/VideoStation/vtestreaming.cgi"
+                        + "?api=SYNO.VideoStation.Streaming&version=2&method=open"
+                        + "&id=" + fileId
+                        + "&format=" + fmt
+                        + "&audio_track_id=0&subtitle_track_id=-1"
+                        + "&accept_format=" + acceptFormat
+                        + "&_sid=" + sid;
+                String body = httpGet(openUrl);
+                JSONObject json = new JSONObject(body);
+                if (!json.optBoolean("success", false)) {
+                    int code = json.optJSONObject("error") != null
+                            ? json.getJSONObject("error").optInt("code", -1) : -1;
+                    mainHandler.post(() -> cb.onError("트랜스코딩 open 실패 (code=" + code + ")"));
+                    return;
+                }
+                String streamId = json.getJSONObject("data").getString("stream_id");
+                String hlsUrl = base + "/webapi/VideoStation/vtestreaming.cgi"
+                        + "?api=SYNO.VideoStation.Streaming&version=2&method=stream"
+                        + "&id=" + URLEncoder.encode(streamId, "UTF-8")
+                        + "&format=" + fmt
+                        + "&_sid=" + sid;
+                TranscodeSession s = new TranscodeSession(streamId, hlsUrl, fileId, fmt);
+                Log.i(TAG, "openTranscodeStream OK streamId=" + streamId + " fileId=" + fileId);
+                mainHandler.post(() -> cb.onResult(s));
+            } catch (Exception e) {
+                Log.w(TAG, "openTranscodeStream exception", e);
+                mainHandler.post(() -> cb.onError("open 오류: " + e.getMessage()));
+            }
+        });
+    }
+
+    /**
+     * 트랜스코딩 세션 종료 (fire-and-forget). 실패해도 조용히 로깅만.
+     * 호출자는 결과를 기다리지 않음 — 누수 방지 용도.
+     */
+    public static void closeTranscodeStream(String streamId, String format) {
+        if (streamId == null || streamId.isEmpty()) return;
+        final String fmt = (format == null || format.isEmpty()) ? "hls" : format;
+        executor.execute(() -> {
+            String sid = cachedSid;
+            if (sid == null) return;
+            try {
+                String base = apiBase();
+                String url = base + "/webapi/VideoStation/vtestreaming.cgi"
+                        + "?api=SYNO.VideoStation.Streaming&version=2&method=close"
+                        + "&id=" + URLEncoder.encode(streamId, "UTF-8")
+                        + "&format=" + fmt
+                        + "&_sid=" + sid;
+                String body = httpGet(url);
+                String head = body != null && body.length() > 120 ? body.substring(0, 120) + "…" : body;
+                Log.i(TAG, "closeTranscodeStream streamId=" + streamId + " ← " + head);
+            } catch (Exception e) {
+                Log.w(TAG, "closeTranscodeStream 실패: " + e.getMessage());
+            }
+        });
+    }
 
     // ── URL 헬퍼 (동기, 네트워크 없음) ──────────────────────────────────────
 
@@ -1595,6 +1864,34 @@ public class DsFileApiClient {
     }
 
     /** JSON body POST (Content-Type: application/json) */
+    /** form-encoded POST (application/x-www-form-urlencoded). Synology 배열/객체 파라미터용. */
+    private static String httpPostForm(String urlStr, String formBody) throws Exception {
+        HttpURLConnection conn = openTrustedConnection(urlStr);
+        conn.setConnectTimeout(CONNECT_TIMEOUT);
+        conn.setReadTimeout(READ_TIMEOUT);
+        conn.setRequestMethod("POST");
+        conn.setDoOutput(true);
+        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+        conn.setRequestProperty("User-Agent", BROWSER_UA);
+        conn.setRequestProperty("Accept", "application/json, text/plain, */*");
+        conn.setInstanceFollowRedirects(false);
+        byte[] bodyBytes = formBody.getBytes(StandardCharsets.UTF_8);
+        try (OutputStream os = conn.getOutputStream()) {
+            os.write(bodyBytes);
+        }
+        int code = conn.getResponseCode();
+        Log.d(TAG, "HTTP POST-form " + code + " ← " + urlStr);
+        InputStream is = (code < 400) ? conn.getInputStream() : conn.getErrorStream();
+        if (is == null) { conn.disconnect(); return ""; }
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = br.readLine()) != null) sb.append(line);
+        }
+        conn.disconnect();
+        return sb.toString();
+    }
+
     private static String httpPost(String urlStr, String jsonBody) throws Exception {
         HttpURLConnection conn = openTrustedConnection(urlStr);
         conn.setConnectTimeout(CONNECT_TIMEOUT);

@@ -40,6 +40,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class MainActivity extends AppCompatActivity implements IVLCVout.Callback {
 
@@ -70,6 +71,12 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
 
     private NasSyncManager nasSyncManager;
     private java.util.concurrent.Future<?> nasFlushing;
+
+    // HLS 트랜스코딩 세션 상태 — 셀룰러 환경에서 NAS 파일 재생 시 사용
+    private boolean useTranscode = false;
+    private String currentStreamId = null;
+    private String currentFormat = null;
+    private final AtomicInteger hlsEpoch = new AtomicInteger(0);
 
     private long pendingSeekMs       = -1;
     private int  pendingSubtitleId   = Integer.MIN_VALUE;
@@ -202,6 +209,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             return;
         }
 
+        useTranscode = getIntent().getBooleanExtra("useTranscode", false);
         currentTitle = getIntent().getStringExtra("title");
         // bucketId 정보 가져오기
         if (PlaylistHolder.playlist != null && PlaylistHolder.currentIndex >= 0) {
@@ -345,10 +353,12 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
 
         loadSavedPosition(currentDbKey);
 
-        // TODO: 5G 환경에서 HLS 트랜스코딩(SYNO.VideoStation2.Streaming) 지원 예정.
-        //       현재는 5G 포함 모든 환경에서 직접 스트리밍으로 재생.
-        {
-            // WiFi / 5G / 로컬 파일 → 직접 재생
+        if (useTranscode && PlaylistHolder.playlist != null && PlaylistHolder.currentIndex >= 0) {
+            // 셀룰러: HLS 트랜스코딩 세션 오픈 후 m3u8 재생
+            VideoItem item = PlaylistHolder.playlist.get(PlaylistHolder.currentIndex);
+            startHlsPlayback(item);
+        } else {
+            // WiFi / 로컬 파일 → 직접 재생
             Media media = openMedia(videoUri);
             if (media == null) {
                 loadingBar.setVisibility(View.GONE);
@@ -360,6 +370,69 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             media.release();
             tryAddExternalSubtitles(videoUri);
             mediaPlayer.play();
+        }
+    }
+
+    /**
+     * HLS 트랜스코딩으로 재생. findFileId → openTranscodeStream → mediaPlayer.play 순.
+     * 재호출 시 이전 세션은 닫고(race 방지 위해 epoch 검사) 새 세션을 연다.
+     * 실패 시 errorText 표시.
+     */
+    private void startHlsPlayback(VideoItem item) {
+        if (item == null || item.nasPath == null || item.nasPath.isEmpty()) {
+            showError("NAS 경로 없음");
+            return;
+        }
+        // 이전 세션 종료 (fire-and-forget)
+        closeCurrentTranscodeSession();
+        final int epoch = hlsEpoch.incrementAndGet();
+        loadingBar.setVisibility(View.VISIBLE);
+        errorText.setVisibility(View.GONE);
+
+        DsFileApiClient.findFileIdForSharePath(item.nasPath, new DsFileApiClient.Callback<Integer>() {
+            @Override public void onResult(Integer fileId) {
+                if (epoch != hlsEpoch.get()) return;
+                DsFileApiClient.openTranscodeStream(fileId, "hls_remux",
+                        new DsFileApiClient.Callback<DsFileApiClient.TranscodeSession>() {
+                    @Override public void onResult(DsFileApiClient.TranscodeSession s) {
+                        if (epoch != hlsEpoch.get()) {
+                            // 이미 다음 요청이 시작됨 → 방금 연 세션 바로 닫기
+                            DsFileApiClient.closeTranscodeStream(s.streamId, s.format);
+                            return;
+                        }
+                        currentStreamId = s.streamId;
+                        currentFormat = s.format;
+                        currentUriKey = s.hlsUrl;
+                        Uri hlsUri = Uri.parse(s.hlsUrl);
+                        Media media = openMedia(hlsUri);
+                        if (media == null) {
+                            showError("HLS 스트림을 열 수 없습니다");
+                            return;
+                        }
+                        mediaPlayer.setMedia(media);
+                        media.release();
+                        tryAddNasSubtitles();
+                        mediaPlayer.play();
+                    }
+                    @Override public void onError(String msg) {
+                        if (epoch != hlsEpoch.get()) return;
+                        showError("HLS 세션 실패: " + msg);
+                    }
+                });
+            }
+            @Override public void onError(String msg) {
+                if (epoch != hlsEpoch.get()) return;
+                showError("file_id 조회 실패: " + msg);
+            }
+        });
+    }
+
+    /** 현재 열려 있는 트랜스코딩 세션을 닫는다. (fire-and-forget) */
+    private void closeCurrentTranscodeSession() {
+        if (currentStreamId != null) {
+            DsFileApiClient.closeTranscodeStream(currentStreamId, currentFormat);
+            currentStreamId = null;
+            currentFormat = null;
         }
     }
 
@@ -802,9 +875,10 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         currentSyncKey = deriveSyncKey();
         loadSavedPosition(currentDbKey);
 
-        // TODO: 5G 환경에서 HLS 트랜스코딩 지원 예정 — 현재는 직접 스트리밍.
-        {
-            // WiFi / 5G / 로컬 파일 → 직접 재생
+        if (useTranscode && item.nasPath != null) {
+            startHlsPlayback(item);
+        } else {
+            // WiFi / 로컬 파일 → 직접 재생
             currentUriKey = item.uri.toString();
             Media media = openMedia(item.uri);
             if (media != null) {
@@ -1340,6 +1414,9 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         super.onDestroy();
         handler.removeCallbacksAndMessages(null);
         saveCurrentPosition();
+        // HLS 세션 누수 방지 — 플레이어 해제 전에 닫기 (epoch 바꿔 콜백 진입도 차단)
+        hlsEpoch.incrementAndGet();
+        closeCurrentTranscodeSession();
         if (mediaPlayer != null) {
             mediaPlayer.getVLCVout().removeCallback(this);
             mediaPlayer.detachViews();
