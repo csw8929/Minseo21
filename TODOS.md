@@ -194,25 +194,34 @@ Updated 2026-04-10 (eng-review fixes + basePath/posDir UI + quality/subtitle fix
 
 ---
 
-## P2 — 5G 환경 HLS 트랜스코딩 (SYNO.VideoStation2.Streaming)
+## ✅ P2 — 5G 환경 HLS remux (SYNO.VideoStation.Streaming v2) (DONE 2026-04-18)
 
-**What:** 5G/LTE 모바일 환경에서 NAS 스트리밍 시 버퍼링이 심해 시청 불가. VideoStation2의 HLS 트랜스코딩 API(`SYNO.VideoStation2.Streaming.open`)를 사용해 720p로 변환 후 스트리밍.
+**What:** 5G/LTE 에서 NAS 스트리밍 시 원본 직결은 공인 IP + 릴레이 대역폭 한계로 버퍼링 심함. legacy `vtestreaming.cgi` (SYNO.VideoStation.Streaming v2) 로 HLS remux 스트리밍.
 
-**Why:** 원본 파일(MKV 1080p ~5GB)을 그대로 스트리밍하면 릴레이 대역폭(약 1Mbps) 초과로 버퍼링. VideoStation이 서버 측에서 720p HLS로 트랜스코딩하면 1/5 이하의 대역폭으로 스트리밍 가능.
+**현재 동작:**
+- WiFi → `useTranscode=false` 직접 스트림 (libVLC 가 원본 HTTP 스트리밍)
+- 5G/Cellular → `useTranscode=true` HLS remux (`format=hls_remux`, `accept_format=hls_remux,hls,raw`)
 
-**조사 결과 (2026-04-11):**
-- VS2.Streaming.open에 `error 120 reason:"type"` 반환 — 모든 파라미터 조합에서 실패.
-- QuickConnect 릴레이(synr-tw3.GOMJI17.direct.quickconnect.to:28095)가 VS2.Streaming API를 차단하는 것으로 추정.
-- DS Video 앱은 5G에서 FileStation.Download 직접 스트리밍을 사용하는 것으로 추정 (HLS 미사용).
-- LAN 환경 테스트 미수행 — LAN에서는 API가 동작할 가능성 있음.
+**Key files:**
+- `DsFileApiClient.java` — `findFileIdForSharePath`, `openTranscodeStream`, `closeTranscodeStream`
+- `FileListActivity.java` `onNasItemClick` — WiFi 분기
+- `MainActivity.java` `startHlsPlayback` — epoch 기반 race 방지 + onDestroy close
 
-**구현 방향:**
-1. LAN(Wi-Fi) 환경에서 VS2.Streaming.open 동작 확인 (릴레이 차단 여부 검증)
-2. DSM Log Center에서 DS Video가 5G 스트리밍 시 호출하는 API 확인
-3. 릴레이 차단 확인 시: LAN 전용 HLS 또는 다른 접근 방식 검토
-4. `DsFileApiClient.java:457` TODO 주석 — 구현 시작점
+**참고:** VS2.Streaming 은 릴레이 차단 이슈. legacy API 가 유일 경로.
 
-**현재 동작:** 모든 환경에서 직접 스트리밍 (5G에서는 버퍼링 발생).
+---
 
-**Effort:** M~L (릴레이 차단 우회 방법 미확인 — 조사 필요)
-**Depends on:** LAN 테스트 + DSM 로그 확인 선행 필요.
+## P3 — HLS 트랜스코딩 모드 테스트
+
+**What:** 현재 5G 경로는 `format=hls_remux` (재인코딩 없음). 고비트레이트 원본 (4K / HDR / 고대역 1080p) 에서는 remux 만으로 대역폭 절감 안 됨. `format=hls` (ffmpeg 트랜스코딩) 로 변환 시 720p / 낮은 비트레이트 출력 가능.
+
+**Why:** 원본이 이미 저비트레이트면 remux 로 충분하지만, 대용량 MKV 는 여전히 버퍼링 가능. 트랜스코딩 모드도 검증 필요.
+
+**테스트 포인트:**
+- `MainActivity.java:395` `openTranscodeStream(fileId, "hls_remux", ...)` → `"hls"` 로 변경하고 체감 비교
+- NAS CPU/GPU 부하 (J3355 Quick Sync 활성 확인)
+- 품질 파라미터 추가 가능 여부 (`video_bitrate`, `resolution`)
+- 자동 선택 로직: 원본 비트레이트 임계 넘으면 `hls`, 아니면 `hls_remux`
+
+**Effort:** S (토글 후 실사용 테스트)
+**Depends on:** 현재 remux 경로 안정화 확인 후 진행.
