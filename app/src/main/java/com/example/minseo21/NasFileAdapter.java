@@ -25,6 +25,7 @@ public class NasFileAdapter extends RecyclerView.Adapter<NasFileAdapter.ViewHold
     private final OnClickListener listener;
     private final SimpleDateFormat dateFormat =
             new SimpleDateFormat("yyyy-MM-dd  HH:mm", Locale.getDefault());
+    private String highlightNasPath;
 
     public NasFileAdapter(OnClickListener listener) {
         this.listener = listener;
@@ -34,6 +35,18 @@ public class NasFileAdapter extends RecyclerView.Adapter<NasFileAdapter.ViewHold
         items.clear();
         items.addAll(newItems);
         notifyDataSetChanged();
+    }
+
+    /** @return 하이라이트된 항목의 position. 없으면 -1. */
+    public int setHighlightNasPath(String nasPath) {
+        this.highlightNasPath = nasPath;
+        notifyDataSetChanged();
+        if (nasPath == null) return -1;
+        for (int i = 0; i < items.size(); i++) {
+            VideoItem it = items.get(i);
+            if (it.type == VideoItem.TYPE_VIDEO && nasPath.equals(it.nasPath)) return i;
+        }
+        return -1;
     }
 
     /** 재생 목록 생성용: 폴더 제외 파일만 반환 */
@@ -57,6 +70,10 @@ public class NasFileAdapter extends RecyclerView.Adapter<NasFileAdapter.ViewHold
     public void onBindViewHolder(@NonNull ViewHolder h, int position) {
         VideoItem item = items.get(position);
         h.tvName.setText(item.name);
+        boolean highlighted = item.type == VideoItem.TYPE_VIDEO
+                && highlightNasPath != null && item.nasPath != null
+                && highlightNasPath.equals(item.nasPath);
+        h.tvName.setTextColor(highlighted ? 0xFF4A90D9 : 0xFFEEEEEE);
         if (item.type == VideoItem.TYPE_FOLDER) {
             h.ivIcon.setImageResource(R.drawable.ic_folder);
             h.tvMeta.setText("");

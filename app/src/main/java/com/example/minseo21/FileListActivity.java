@@ -55,6 +55,7 @@ public class FileListActivity extends AppCompatActivity {
 
     // ── 로컬 ──────────────────────────────────────────────────────────────────
     private FileItemAdapter localAdapter;
+    private RecyclerView rvLocal;
     private TextView tvPath;
     private TextView tvEmpty;
     private String currentBucketId   = null;
@@ -76,10 +77,16 @@ public class FileListActivity extends AppCompatActivity {
     private final Handler resumeTimeoutHandler = new Handler(Looper.getMainLooper());
     private final AtomicBoolean resumeCheckCompleted = new AtomicBoolean(false);
 
+    // ── 즐겨찾기 ───────────────────────────────────────────────────────────
+    private FavoriteAdapter favAdapter;
+    private RecyclerView rvFavorites;
+    private TextView tvFavEmpty;
+
     // ── 탭 ──────────────────────────────────────────────────────────────────
     private TabLayout tabLayout;
     private static final int TAB_LOCAL = 0;
     private static final int TAB_NAS   = 1;
+    private static final int TAB_FAV   = 2;
     private int currentTab = TAB_LOCAL;
 
     private final ActivityResultLauncher<String> permLauncher =
@@ -106,6 +113,12 @@ public class FileListActivity extends AppCompatActivity {
         if (!nasPathStack.isEmpty()) {
             outState.putStringArrayList("nasPathStack", new ArrayList<>(nasPathStack));
         }
+        // 로컬 폴더 상태 저장: 재생 중 Activity가 파괴되어도 복원 시 해당 폴더로 복귀
+        if (currentBucketId != null) {
+            outState.putString("currentBucketId", currentBucketId);
+            outState.putString("currentBucketName", currentBucketName);
+        }
+        outState.putInt("currentTab", currentTab);
     }
 
     @Override
@@ -119,10 +132,16 @@ public class FileListActivity extends AppCompatActivity {
             if (savedStack != null && !savedStack.isEmpty()) {
                 nasPathStack.addAll(savedStack);
             }
+            // 로컬 폴더 상태 복원 — checkPermissionAndLoad()에서 이 값이 있으면 해당 폴더로 복귀
+            currentBucketId   = savedInstanceState.getString("currentBucketId");
+            currentBucketName = savedInstanceState.getString("currentBucketName");
+            currentTab        = savedInstanceState.getInt("currentTab", TAB_LOCAL);
         }
 
         tvPath       = findViewById(R.id.tvPath);
         tvEmpty      = findViewById(R.id.tvEmpty);
+        rvFavorites  = findViewById(R.id.rvFavorites);
+        tvFavEmpty   = findViewById(R.id.tvFavEmpty);
         nasLoadingView = findViewById(R.id.nasLoadingView);
         nasErrorView   = findViewById(R.id.nasErrorView);
         tvNasError     = findViewById(R.id.tvNasError);
@@ -148,9 +167,9 @@ public class FileListActivity extends AppCompatActivity {
         });
 
         // 로컬 RecyclerView
-        RecyclerView rv = findViewById(R.id.recyclerView);
-        rv.setLayoutManager(new LinearLayoutManager(this));
-        rv.addItemDecoration(new DividerItemDecoration(this, DividerItemDecoration.VERTICAL));
+        rvLocal = findViewById(R.id.recyclerView);
+        rvLocal.setLayoutManager(new LinearLayoutManager(this));
+        rvLocal.addItemDecoration(new DividerItemDecoration(this, DividerItemDecoration.VERTICAL));
         localAdapter = new FileItemAdapter(item -> {
             if (item.type == VideoItem.TYPE_FOLDER) {
                 loadVideosInBucket(item.bucketId, item.name);
@@ -161,12 +180,21 @@ public class FileListActivity extends AppCompatActivity {
                 playVideo(item.uri, item.name);
             }
         });
-        rv.setAdapter(localAdapter);
+        rvLocal.setAdapter(localAdapter);
 
         // NAS RecyclerView
         rvNas.setLayoutManager(new LinearLayoutManager(this));
         rvNas.addItemDecoration(new DividerItemDecoration(this, DividerItemDecoration.VERTICAL));
         nasAdapter = new NasFileAdapter(this::onNasItemClick);
+
+        // 즐겨찾기 RecyclerView
+        rvFavorites.setLayoutManager(new LinearLayoutManager(this));
+        rvFavorites.addItemDecoration(new DividerItemDecoration(this, DividerItemDecoration.VERTICAL));
+        favAdapter = new FavoriteAdapter(new FavoriteAdapter.Listener() {
+            @Override public void onClick(Favorite fav) { playFavorite(fav); }
+            @Override public void onLongClick(Favorite fav) { confirmDeleteFavorite(fav); }
+        });
+        rvFavorites.setAdapter(favAdapter);
 
         // 재시도 버튼
         Button btnRetry = findViewById(R.id.btnNasRetry);
@@ -175,11 +203,13 @@ public class FileListActivity extends AppCompatActivity {
         // 탭 설정
         tabLayout.addTab(tabLayout.newTab().setText("로컬"));
         tabLayout.addTab(tabLayout.newTab().setText("NAS"));
+        tabLayout.addTab(tabLayout.newTab().setText("즐겨찾기"));
         tabLayout.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
             @Override public void onTabSelected(TabLayout.Tab tab) {
                 currentTab = tab.getPosition();
                 if (currentTab == TAB_LOCAL) showLocalTab();
-                else showNasTab();
+                else if (currentTab == TAB_NAS) showNasTab();
+                else showFavTab();
             }
             @Override public void onTabUnselected(TabLayout.Tab tab) {}
             @Override public void onTabReselected(TabLayout.Tab tab) {}
@@ -189,7 +219,10 @@ public class FileListActivity extends AppCompatActivity {
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {
-                if (currentTab == TAB_NAS) {
+                if (currentTab == TAB_FAV) {
+                    // 즐겨찾기 탭 → 로컬 탭으로
+                    tabLayout.selectTab(tabLayout.getTabAt(TAB_LOCAL));
+                } else if (currentTab == TAB_NAS) {
                     if (nasPathStack.size() > 1) {
                         nasPathStack.pop();
                         loadNasFolder(nasPathStack.peek());
@@ -209,6 +242,11 @@ public class FileListActivity extends AppCompatActivity {
         });
 
         checkPermissionAndLoad();
+
+        // 복원된 탭이 로컬이 아니면 그 탭을 선택 (onTabSelected 리스너가 해당 뷰를 표시)
+        if (currentTab != TAB_LOCAL) {
+            tabLayout.selectTab(tabLayout.getTabAt(currentTab));
+        }
     }
 
     // ── 로컬 탭 ──────────────────────────────────────────────────────────────
@@ -223,6 +261,8 @@ public class FileListActivity extends AppCompatActivity {
         rvNas.setVisibility(View.GONE);
         nasLoadingView.setVisibility(View.GONE);
         nasErrorView.setVisibility(View.GONE);
+        rvFavorites.setVisibility(View.GONE);
+        tvFavEmpty.setVisibility(View.GONE);
     }
 
     private void checkPermissionAndLoad() {
@@ -230,7 +270,13 @@ public class FileListActivity extends AppCompatActivity {
                 ? Manifest.permission.READ_MEDIA_VIDEO
                 : Manifest.permission.READ_EXTERNAL_STORAGE;
         if (checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED) {
-            loadBucketList();
+            // Activity 재생성으로 복원된 폴더가 있으면 그 폴더로, 아니면 bucket 목록으로
+            if (currentBucketId != null) {
+                loadVideosInBucket(currentBucketId,
+                        currentBucketName != null ? currentBucketName : "");
+            } else {
+                loadBucketList();
+            }
             checkLastPlayback();
         } else {
             permLauncher.launch(perm);
@@ -407,7 +453,8 @@ public class FileListActivity extends AppCompatActivity {
         new AlertDialog.Builder(this)
                 .setTitle("이어서 볼까요?")
                 .setMessage("다른 단말에서 재생 중이던 영상입니다.\n[로컬 파일로 재생]\n\n" + fileName)
-                .setPositiveButton("예", (dialog, which) -> playVideo(localUri, fileName))
+                .setPositiveButton("예", (dialog, which) ->
+                        startLocalWithFolderView(localUri, fileName, null, null))
                 .setNegativeButton("아니오", null)
                 .show();
     }
@@ -426,34 +473,29 @@ public class FileListActivity extends AppCompatActivity {
                         + "\n\n"
                         + (last.name != null ? last.name : "알 수 없는 파일"))
                 .setPositiveButton("예", (dialog, which) -> {
-                    if (!isNas && last.bucketId != null) {
-                        List<VideoItem> videos = queryVideosInBucket(last.bucketId, "");
-                        if (!videos.isEmpty()) {
-                            PlaylistHolder.playlist = videos;
-                            int idx = -1;
-                            for (int i = 0; i < videos.size(); i++) {
-                                if (videos.get(i).uri.toString().equals(last.uri)) { idx = i; break; }
-                            }
-                            PlaylistHolder.currentIndex = idx >= 0 ? idx : 0;
-                        }
-                    }
                     if (isNas) {
-                        tabLayout.selectTab(tabLayout.getTabAt(TAB_NAS));
-                        // HLS 경로용: PlaylistHolder 에 단일 아이템 구성 (nasPath 전달)
                         String nasPath = Uri.parse(finalUri).getQueryParameter("path");
-                        if (nasPath != null) {
-                            VideoItem vi = VideoItem.nasFileWithStream(
-                                    last.name != null ? last.name : "",
-                                    nasPath, finalUri, last.uri);
-                            List<VideoItem> pl = new ArrayList<>();
-                            pl.add(vi);
-                            PlaylistHolder.playlist = pl;
-                            PlaylistHolder.currentIndex = 0;
+                        String sid = nasSid != null ? nasSid : DsFileApiClient.getCachedSid();
+                        if (nasPath != null && sid != null) {
+                            // 1회 recovery: 부모 폴더 목록 조회로 플레이리스트 복원, 실패 시 단일 항목 폴백
+                            startNasWithFolderRecovery(nasPath, last.uri, last.name, sid);
+                        } else {
+                            if (nasPath != null) {
+                                VideoItem vi = VideoItem.nasFileWithStream(
+                                        last.name != null ? last.name : "",
+                                        nasPath, finalUri, last.uri);
+                                List<VideoItem> pl = new ArrayList<>();
+                                pl.add(vi);
+                                PlaylistHolder.playlist = pl;
+                                PlaylistHolder.currentIndex = 0;
+                            }
+                            tabLayout.selectTab(tabLayout.getTabAt(TAB_NAS));
+                            boolean useTranscode = !DsFileApiClient.isWifi(FileListActivity.this);
+                            playNasVideo(Uri.parse(finalUri), last.name, useTranscode);
                         }
-                        boolean useTranscode = !DsFileApiClient.isWifi(FileListActivity.this);
-                        playNasVideo(Uri.parse(finalUri), last.name, useTranscode);
                     } else {
-                        playVideo(Uri.parse(finalUri), last.name);
+                        // 로컬도 즐겨찾기와 동일하게 폴더 복원 후 재생
+                        startLocalWithFolderView(Uri.parse(finalUri), last.name, last.bucketId, null);
                     }
                 })
                 .setNegativeButton("아니오", (d, w) ->
@@ -514,6 +556,19 @@ public class FileListActivity extends AppCompatActivity {
         return items;
     }
 
+    /** URI → {bucketId, bucketDisplayName} 복구. 실패 시 null. */
+    private String[] lookupBucketFromUri(Uri uri) {
+        String[] proj = { MediaStore.Video.Media.BUCKET_ID, MediaStore.Video.Media.BUCKET_DISPLAY_NAME };
+        try (Cursor c = getContentResolver().query(uri, proj, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                String id = c.getString(0);
+                String display = c.getString(1);
+                if (id != null) return new String[]{id, display};
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
     private void loadVideosInBucket(String bucketId, String bucketName) {
         currentBucketId = bucketId; currentBucketName = bucketName;
         tvPath.setText("내장저장공간 / " + bucketName);
@@ -533,6 +588,8 @@ public class FileListActivity extends AppCompatActivity {
         btnNasSettings.setVisibility(View.VISIBLE);
         findViewById(R.id.recyclerView).setVisibility(View.GONE);
         tvEmpty.setVisibility(View.GONE);
+        rvFavorites.setVisibility(View.GONE);
+        tvFavEmpty.setVisibility(View.GONE);
 
         // 인증 정보가 없으면 설정 화면 먼저
         if (!nasCredStore.hasCredentials()) {
@@ -691,6 +748,220 @@ public class FileListActivity extends AppCompatActivity {
         if (pbResumeCheck != null) pbResumeCheck.setVisibility(View.GONE);
     }
 
+    // ── 즐겨찾기 탭 ──────────────────────────────────────────────────────────
+
+    private void showFavTab() {
+        btnNasSettings.setVisibility(View.GONE);
+        findViewById(R.id.recyclerView).setVisibility(View.GONE);
+        tvEmpty.setVisibility(View.GONE);
+        rvNas.setVisibility(View.GONE);
+        nasLoadingView.setVisibility(View.GONE);
+        nasErrorView.setVisibility(View.GONE);
+        tvPath.setText("즐겨찾기");
+        rvFavorites.setVisibility(View.VISIBLE);
+        loadFavorites();
+    }
+
+    private void loadFavorites() {
+        dbExecutor.execute(() -> {
+            PlaybackDatabase db = PlaybackDatabase.getInstance(this);
+            List<Favorite> favs = db.favoriteDao().getAll();
+            PlaybackPosition lastLocal = db.playbackDao().getLastLocalPosition();
+            PlaybackPosition lastNas   = db.playbackDao().getLastNasPosition();
+
+            List<Favorite> combined = new ArrayList<>();
+            if (lastLocal != null) combined.add(recentFrom(lastLocal, false));
+            if (lastNas != null)   combined.add(recentFrom(lastNas, true));
+            combined.addAll(favs);
+
+            runOnUiThread(() -> {
+                favAdapter.setItems(combined);
+                tvFavEmpty.setVisibility(combined.isEmpty() ? View.VISIBLE : View.GONE);
+            });
+        });
+    }
+
+    /** playback_position → 합성 Favorite (빨간 별표 "마지막 재생" 항목). */
+    private Favorite recentFrom(PlaybackPosition pp, boolean isNas) {
+        Favorite f = new Favorite();
+        f.uri        = pp.uri;
+        f.name       = pp.name;
+        f.isNas      = isNas;
+        f.bucketId   = pp.bucketId;
+        f.positionMs = pp.positionMs;
+        f.addedAt    = pp.updatedAt;
+        f.isRecent   = true;
+        if (isNas) {
+            // canonical URL에서 nasPath 추출 (재생 시 스트림 URL 재발급용)
+            try { f.nasPath = Uri.parse(pp.uri).getQueryParameter("path"); }
+            catch (Exception ignored) {}
+        }
+        return f;
+    }
+
+    private void playFavorite(Favorite fav) {
+        // 재생 전에 해당 파일 위치를 playback_position에 써서 기존 이어가기 로직이 그대로 사용되도록 함
+        PlaybackPosition pp = new PlaybackPosition();
+        pp.uri        = fav.uri;
+        pp.name       = fav.name;
+        pp.bucketId   = fav.bucketId;
+        pp.positionMs = fav.positionMs;
+        pp.updatedAt  = System.currentTimeMillis();
+
+        dbExecutor.execute(() -> {
+            PlaybackDatabase.getInstance(this).playbackDao().savePosition(pp);
+            runOnUiThread(() -> {
+                if (fav.isNas) playFavoriteNas(fav);
+                else playFavoriteLocal(fav);
+            });
+        });
+    }
+
+    private void playFavoriteLocal(Favorite fav) {
+        startLocalWithFolderView(Uri.parse(fav.uri), fav.name, fav.bucketId, fav.bucketDisplayName);
+    }
+
+    /**
+     * 로컬 파일 재생 헬퍼 — 즐겨찾기/이어보기 공통 진입점.
+     * 해당 파일의 폴더를 쿼리해 플레이리스트 복원 + 로컬 탭 상태를 그 폴더로 이동 → Back 시 폴더 목록으로 복귀.
+     */
+    private void startLocalWithFolderView(Uri uri, String name, String bucketId, String bucketDisplayName) {
+        // bucketId가 null이면 URI로 MediaStore를 1회 조회해 복구 (NAS의 listFolder recovery 대응)
+        if (bucketId == null && uri != null) {
+            String[] recovered = lookupBucketFromUri(uri);
+            if (recovered != null) {
+                bucketId = recovered[0];
+                if (bucketDisplayName == null) bucketDisplayName = recovered[1];
+            }
+        }
+        if (bucketId != null) {
+            List<VideoItem> videos = queryVideosInBucket(bucketId, bucketDisplayName != null ? bucketDisplayName : "");
+            if (!videos.isEmpty()) {
+                PlaylistHolder.playlist = videos;
+                int idx = -1;
+                String target = uri.toString();
+                for (int i = 0; i < videos.size(); i++) {
+                    if (videos.get(i).uri.toString().equals(target)) { idx = i; break; }
+                }
+                PlaylistHolder.currentIndex = idx >= 0 ? idx : 0;
+                currentBucketId   = bucketId;
+                currentBucketName = bucketDisplayName != null ? bucketDisplayName : "";
+                currentVideoList  = videos;
+                showLocalItems(videos, null);
+                tabLayout.selectTab(tabLayout.getTabAt(TAB_LOCAL));
+            }
+        }
+        playVideo(uri, name);
+    }
+
+    private void playFavoriteNas(Favorite fav) {
+        // SID 확보 후 스트림 URL 재생성 (nasPath 기반)
+        if (nasSid == null) nasSid = DsFileApiClient.getCachedSid();
+        if (nasSid != null && fav.nasPath != null) {
+            launchNasFavorite(fav, nasSid);
+            return;
+        }
+        // 로그인 필요
+        DsFileApiClient.login(new DsFileApiClient.Callback<String>() {
+            @Override public void onResult(String sid) {
+                if (isFinishing() || isDestroyed()) return;
+                nasSid = sid;
+                if (fav.nasPath != null) launchNasFavorite(fav, sid);
+                else Toast.makeText(FileListActivity.this, "NAS 경로 정보 없음", Toast.LENGTH_SHORT).show();
+            }
+            @Override public void onError(String msg) {
+                if (isFinishing() || isDestroyed()) return;
+                Toast.makeText(FileListActivity.this, "NAS 연결 실패: " + msg, Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+
+    private void launchNasFavorite(Favorite fav, String sid) {
+        startNasWithFolderRecovery(fav.nasPath, fav.uri, fav.name, sid);
+    }
+
+    /**
+     * NAS 파일 재생 헬퍼 — 부모 폴더 내용을 1회 listFolder로 조회해 플레이리스트 복원.
+     * 실패(네트워크/권한 등) 시 단일 항목으로 폴백. Back 시 해당 폴더로 돌아가도록 스택도 구성.
+     */
+    private void startNasWithFolderRecovery(String nasPath, String canonicalUri,
+                                            String name, String sid) {
+        if (nasPath == null || nasPath.isEmpty()) {
+            playSingleNas(nasPath, canonicalUri, name, sid);
+            return;
+        }
+        int lastSlash = nasPath.lastIndexOf('/');
+        String parentPath = lastSlash > 0 ? nasPath.substring(0, lastSlash) : nasPath;
+        final String targetNasPath = nasPath;
+
+        DsFileApiClient.listFolder(parentPath, sid, new DsFileApiClient.Callback<List<VideoItem>>() {
+            @Override public void onResult(List<VideoItem> items) {
+                if (isFinishing() || isDestroyed()) return;
+                List<VideoItem> playlist = new ArrayList<>();
+                int targetIdx = 0;
+                for (VideoItem f : items) {
+                    if (f.type != VideoItem.TYPE_VIDEO) continue;
+                    String url = DsFileApiClient.getStreamUrl(f.nasPath, sid);
+                    playlist.add(VideoItem.nasFileWithStream(f.name, f.nasPath, url, f.canonicalUri));
+                    if (f.nasPath != null && f.nasPath.equals(targetNasPath)) {
+                        targetIdx = playlist.size() - 1;
+                    }
+                }
+                if (playlist.isEmpty()) {
+                    playSingleNas(targetNasPath, canonicalUri, name, sid);
+                    return;
+                }
+                PlaylistHolder.playlist = playlist;
+                PlaylistHolder.currentIndex = targetIdx;
+
+                nasPathStack.clear();
+                nasPathStack.push(DsFileApiClient.getBasePath());
+                if (!parentPath.equals(DsFileApiClient.getBasePath())) {
+                    nasPathStack.push(parentPath);
+                }
+                tabLayout.selectTab(tabLayout.getTabAt(TAB_NAS));
+
+                String streamUrl = playlist.get(targetIdx).uri.toString();
+                boolean useTranscode = !DsFileApiClient.isWifi(FileListActivity.this);
+                playNasVideo(Uri.parse(streamUrl), name, useTranscode);
+            }
+            @Override public void onError(String msg) {
+                if (isFinishing() || isDestroyed()) return;
+                playSingleNas(targetNasPath, canonicalUri, name, sid);
+            }
+        });
+    }
+
+    /** 폴더 복원 실패/불가 시의 단일 항목 폴백. */
+    private void playSingleNas(String nasPath, String canonicalUri, String name, String sid) {
+        String url = DsFileApiClient.getStreamUrl(nasPath, sid);
+        VideoItem vi = VideoItem.nasFileWithStream(
+                name != null ? name : "", nasPath, url, canonicalUri);
+        List<VideoItem> pl = new ArrayList<>();
+        pl.add(vi);
+        PlaylistHolder.playlist = pl;
+        PlaylistHolder.currentIndex = 0;
+        tabLayout.selectTab(tabLayout.getTabAt(TAB_NAS));
+        boolean useTranscode = !DsFileApiClient.isWifi(FileListActivity.this);
+        playNasVideo(Uri.parse(url), name, useTranscode);
+    }
+
+    private void confirmDeleteFavorite(Favorite fav) {
+        // "마지막 재생" 항목은 합성된 것이라 삭제 불가
+        if (fav.isRecent) return;
+        new AlertDialog.Builder(this)
+                .setTitle("즐겨찾기 삭제")
+                .setMessage("삭제하시겠습니까?\n\n" + (fav.name != null ? fav.name : ""))
+                .setPositiveButton("삭제", (d, w) -> {
+                    dbExecutor.execute(() -> {
+                        PlaybackDatabase.getInstance(this).favoriteDao().deleteById(fav.id);
+                        runOnUiThread(this::loadFavorites);
+                    });
+                })
+                .setNegativeButton("취소", null)
+                .show();
+    }
+
     // ── 공통 ─────────────────────────────────────────────────────────────────
 
     private int extractEpisodeNumber(String name) {
@@ -705,6 +976,52 @@ public class FileListActivity extends AppCompatActivity {
         intent.setData(uri);
         intent.putExtra("title", title);
         startActivity(intent);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        refreshHighlight();
+    }
+
+    /** MainActivity에서 돌아왔을 때 마지막 재생 영상 항목을 파란색으로 표시. */
+    private void refreshHighlight() {
+        dbExecutor.execute(() -> {
+            PlaybackDatabase db = PlaybackDatabase.getInstance(this);
+            PlaybackPosition local = db.playbackDao().getLastLocalPosition();
+            PlaybackPosition nas   = db.playbackDao().getLastNasPosition();
+            String localUri = local != null ? local.uri : null;
+            String nasPath = null;
+            if (nas != null && nas.uri != null) {
+                try { nasPath = Uri.parse(nas.uri).getQueryParameter("path"); }
+                catch (Exception ignored) {}
+            }
+            final String finalLocalUri = localUri;
+            final String finalNasPath  = nasPath;
+            runOnUiThread(() -> {
+                if (localAdapter != null) {
+                    int pos = localAdapter.setHighlightUri(finalLocalUri);
+                    if (pos >= 0 && rvLocal != null) scrollIntoView(rvLocal, pos);
+                }
+                if (nasAdapter != null) {
+                    int pos = nasAdapter.setHighlightNasPath(finalNasPath);
+                    if (pos >= 0 && rvNas != null) scrollIntoView(rvNas, pos);
+                }
+            });
+        });
+    }
+
+    /** position이 RecyclerView 뷰포트 중앙 근처에 오도록 스크롤. */
+    private void scrollIntoView(RecyclerView rv, int position) {
+        androidx.recyclerview.widget.RecyclerView.LayoutManager lm = rv.getLayoutManager();
+        if (lm instanceof LinearLayoutManager) {
+            int first = ((LinearLayoutManager) lm).findFirstCompletelyVisibleItemPosition();
+            int last  = ((LinearLayoutManager) lm).findLastCompletelyVisibleItemPosition();
+            if (position >= first && position <= last && first != RecyclerView.NO_POSITION) return;
+            ((LinearLayoutManager) lm).scrollToPositionWithOffset(position, rv.getHeight() / 3);
+        } else {
+            rv.scrollToPosition(position);
+        }
     }
 
     @Override

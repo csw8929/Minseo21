@@ -99,6 +99,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     private ImageButton btnOptions;
     private ImageButton btnRotationLock;
     private TextView btnSpeed;
+    private ImageButton btnFavorite;
     private ImageButton btnPlayPause;
     private ImageButton btnRewind;
     private ImageButton btnFastForward;
@@ -189,6 +190,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         float savedSpeed = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
                 .getFloat(KEY_PLAYBACK_SPEED, 1.0f);
         btnSpeed.setText(formatSpeed(savedSpeed));
+        btnFavorite      = findViewById(R.id.btnFavorite);
         btnPlayPause     = findViewById(R.id.btnPlayPause);
         btnRewind        = findViewById(R.id.btnRewind);
         btnFastForward   = findViewById(R.id.btnFastForward);
@@ -620,6 +622,34 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         });
     }
 
+    private void addCurrentToFavorites() {
+        if (currentDbKey == null) {
+            Toast.makeText(this, "재생 정보를 읽을 수 없습니다", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        long pos = (mediaPlayer != null) ? mediaPlayer.getTime() : 0;
+        if (pos < 0) pos = 0;
+
+        final Favorite fav = new Favorite();
+        fav.uri      = currentDbKey;
+        fav.name     = currentTitle;
+        fav.isNas    = DsFileApiClient.isNasUrl(currentDbKey) || currentDbKey.startsWith("http");
+        fav.positionMs = pos;
+        fav.addedAt  = System.currentTimeMillis();
+
+        if (PlaylistHolder.playlist != null && PlaylistHolder.currentIndex >= 0
+                && PlaylistHolder.currentIndex < PlaylistHolder.playlist.size()) {
+            VideoItem vi = PlaylistHolder.playlist.get(PlaylistHolder.currentIndex);
+            fav.nasPath = vi.nasPath;
+            fav.bucketId = vi.bucketId;
+            fav.bucketDisplayName = vi.bucketDisplayName;
+        }
+        if (fav.bucketId == null) fav.bucketId = currentBucketId;
+
+        dbExecutor.execute(() -> PlaybackDatabase.getInstance(this).favoriteDao().insert(fav));
+        Toast.makeText(this, "즐겨찾기에 추가됨", Toast.LENGTH_SHORT).show();
+    }
+
     private void saveCurrentPosition() {
         if (mediaPlayer == null || currentUriKey == null) return;
         if (currentDbKey == null) return;
@@ -946,6 +976,11 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
 
         btnNext.setOnClickListener(v -> {
             playEpisode(PlaylistHolder.currentIndex + 1);
+            resetHideTimer();
+        });
+
+        btnFavorite.setOnClickListener(v -> {
+            addCurrentToFavorites();
             resetHideTimer();
         });
 

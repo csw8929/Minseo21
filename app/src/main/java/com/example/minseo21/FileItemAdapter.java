@@ -24,6 +24,7 @@ public class FileItemAdapter extends RecyclerView.Adapter<FileItemAdapter.ViewHo
     private final List<VideoItem> items = new ArrayList<>();
     private final OnClickListener listener;
     private final SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd  HH:mm", Locale.getDefault());
+    private String highlightUri;
 
     public FileItemAdapter(OnClickListener listener) {
         this.listener = listener;
@@ -33,6 +34,19 @@ public class FileItemAdapter extends RecyclerView.Adapter<FileItemAdapter.ViewHo
         items.clear();
         items.addAll(newItems);
         notifyDataSetChanged();
+    }
+
+    /** @return 하이라이트된 항목의 position. 없으면 -1. */
+    public int setHighlightUri(String uri) {
+        this.highlightUri = uri;
+        notifyDataSetChanged();
+        if (uri == null) return -1;
+        for (int i = 0; i < items.size(); i++) {
+            VideoItem it = items.get(i);
+            if (it.type == VideoItem.TYPE_VIDEO && it.uri != null
+                    && uri.equals(it.uri.toString())) return i;
+        }
+        return -1;
     }
 
     @NonNull
@@ -47,6 +61,10 @@ public class FileItemAdapter extends RecyclerView.Adapter<FileItemAdapter.ViewHo
     public void onBindViewHolder(@NonNull ViewHolder h, int position) {
         VideoItem item = items.get(position);
         h.tvName.setText(item.name);
+        boolean highlighted = item.type == VideoItem.TYPE_VIDEO
+                && highlightUri != null && item.uri != null
+                && highlightUri.equals(item.uri.toString());
+        h.tvName.setTextColor(highlighted ? 0xFF4A90D9 : 0xFFEEEEEE);
         if (item.type == VideoItem.TYPE_FOLDER) {
             h.ivIcon.setImageResource(R.drawable.ic_folder);
             h.tvMeta.setText("");

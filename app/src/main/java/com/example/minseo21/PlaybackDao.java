@@ -13,6 +13,12 @@ public interface PlaybackDao {
     @Query("SELECT * FROM playback_position ORDER BY updatedAt DESC LIMIT 1")
     PlaybackPosition getLastPosition();
 
+    @Query("SELECT * FROM playback_position WHERE uri NOT LIKE 'http%' ORDER BY updatedAt DESC LIMIT 1")
+    PlaybackPosition getLastLocalPosition();
+
+    @Query("SELECT * FROM playback_position WHERE uri LIKE 'http%' ORDER BY updatedAt DESC LIMIT 1")
+    PlaybackPosition getLastNasPosition();
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     void savePosition(PlaybackPosition position);
 
