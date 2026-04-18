@@ -211,7 +211,10 @@ public class FileListActivity extends AppCompatActivity {
                 else if (currentTab == TAB_NAS) showNasTab();
                 else showFavTab();
             }
-            @Override public void onTabUnselected(TabLayout.Tab tab) {}
+            @Override public void onTabUnselected(TabLayout.Tab tab) {
+                // 즐겨찾기 탭에서 벗어날 때 ResumeSnapshot 업데이트 훅 해제
+                if (tab.getPosition() == TAB_FAV) ResumeSnapshot.onUpdate = null;
+            }
             @Override public void onTabReselected(TabLayout.Tab tab) {}
         });
 
@@ -318,6 +321,17 @@ public class FileListActivity extends AppCompatActivity {
         }
 
         dbExecutor.execute(() -> {
+            // ResumeSnapshot LOCAL 캡처 — 프로세스 시작 시 1회만 (hasLocalState 무관하게 시도)
+            if (ResumeSnapshot.local == null) {
+                PlaybackPosition localOnly = PlaybackDatabase.getInstance(this)
+                        .playbackDao().getLastLocalPosition();
+                if (localOnly != null && localOnly.uri != null) {
+                    ResumeSnapshot.local = recentFrom(localOnly, false);
+                    Runnable cb = ResumeSnapshot.onUpdate;
+                    if (cb != null) runOnUiThread(cb);
+                }
+            }
+
             PlaybackPosition localLast = hasLocalState
                     ? PlaybackDatabase.getInstance(this).playbackDao().getLastPosition()
                     : null;
@@ -363,6 +377,9 @@ public class FileListActivity extends AppCompatActivity {
     private void fetchNasAndShowResume(PlaybackPosition localLast, String sid) {
         DsFileApiClient.downloadUserPositions(new DsFileApiClient.Callback<JSONObject>() {
             @Override public void onResult(JSONObject positions) {
+                // ResumeSnapshot NAS 캡처 — resume 분기와 독립. 5초 타임아웃 후에도 동작.
+                captureNasSnapshotIfNull(positions);
+
                 NasSyncManager.NasResumeEntry nasEntry =
                         NasSyncManager.findMostRecentEntry(positions);
 
@@ -759,19 +776,20 @@ public class FileListActivity extends AppCompatActivity {
         nasErrorView.setVisibility(View.GONE);
         tvPath.setText("즐겨찾기");
         rvFavorites.setVisibility(View.VISIBLE);
+        // NAS 콜백 늦게 도착 시 자동 갱신 훅
+        ResumeSnapshot.onUpdate = this::loadFavorites;
         loadFavorites();
     }
 
     private void loadFavorites() {
         dbExecutor.execute(() -> {
-            PlaybackDatabase db = PlaybackDatabase.getInstance(this);
-            List<Favorite> favs = db.favoriteDao().getAll();
-            PlaybackPosition lastLocal = db.playbackDao().getLastLocalPosition();
-            PlaybackPosition lastNas   = db.playbackDao().getLastNasPosition();
+            List<Favorite> favs = PlaybackDatabase.getInstance(this).favoriteDao().getAll();
 
             List<Favorite> combined = new ArrayList<>();
-            if (lastLocal != null) combined.add(recentFrom(lastLocal, false));
-            if (lastNas != null)   combined.add(recentFrom(lastNas, true));
+            Favorite snapLocal = ResumeSnapshot.local;
+            Favorite snapNas   = ResumeSnapshot.nas;
+            if (snapLocal != null) combined.add(snapLocal);  // [LOCAL] 빨간 별표
+            if (snapNas   != null) combined.add(snapNas);    // [NAS]   빨간 별표 (중복 허용)
             combined.addAll(favs);
 
             runOnUiThread(() -> {
@@ -779,6 +797,118 @@ public class FileListActivity extends AppCompatActivity {
                 tvFavEmpty.setVisibility(combined.isEmpty() ? View.VISIBLE : View.GONE);
             });
         });
+    }
+
+    /**
+     * NAS positions.json 결과로 "빨간 별표 NAS" 스냅샷을 한 번 캡처.
+     *
+     * 전략: positions 항목을 updatedAt DESC 순회. 각 항목에 대해 아래 우선순위로 합성 시도.
+     * 첫 성공이 채택되고, 나머지는 스킵.
+     *   1) deviceId == this + Room DB에 이력 존재 → Room DB 기반 (uri/bucketId 복구)
+     *   2) 이 단말 MediaStore에 같은 파일명 존재 → 로컬 Favorite (startup cross-device dialog 로직과 일치)
+     *   3) nasPath 존재 → NAS 스트리밍 Favorite
+     *   4) 어디에도 해당 안 됨 (다른 단말의 로컬 파일인데 이 단말에 없음) → 다음 후보
+     *
+     * Startup resume가 제안한 항목과 동일한 결과를 보장한다.
+     */
+    private void captureNasSnapshotIfNull(JSONObject positions) {
+        if (ResumeSnapshot.nas != null) return;
+        java.util.List<NasSyncManager.NasResumeEntry> candidates =
+                NasSyncManager.listEntriesDescending(positions);
+        if (candidates.isEmpty()) return;
+        final String thisDeviceId = android.provider.Settings.Secure.getString(
+                getContentResolver(), android.provider.Settings.Secure.ANDROID_ID);
+        // DB / MediaStore 조회가 포함되므로 dbExecutor에서 순회
+        dbExecutor.execute(() -> {
+            for (NasSyncManager.NasResumeEntry entry : candidates) {
+                Favorite f = tryCaptureOne(entry, thisDeviceId);
+                if (f != null) {
+                    runOnUiThread(() -> setNasSnapshot(f));
+                    return;
+                }
+            }
+        });
+    }
+
+    /** 한 항목을 이 단말에서 재생 가능한 Favorite으로 합성 시도. 불가능하면 null. */
+    private Favorite tryCaptureOne(NasSyncManager.NasResumeEntry entry, String thisDeviceId) {
+        boolean sameDevice = thisDeviceId != null && thisDeviceId.equals(entry.deviceId);
+
+        // 1) 이 단말의 이력 — Room DB에서 full 정보 (uri/bucketId/트랙 설정)
+        if (sameDevice) {
+            PlaybackPosition pp = PlaybackDatabase.getInstance(this)
+                    .playbackDao().getLastPositionByName(entry.fileName());
+            if (pp != null && pp.uri != null) {
+                boolean isNas = DsFileApiClient.isNasUrl(pp.uri) || pp.uri.startsWith("http");
+                return recentFrom(pp, isNas);
+            }
+            // Room DB에 없으면 (재설치 등) 아래 로컬/NAS 합성으로 폴백
+        }
+
+        // 2) 이 단말의 MediaStore에 같은 파일명 존재 → 로컬 Favorite
+        //    (startup cross-device dialog가 이 경로로 로컬 재생을 제안하는 것과 동일 기준)
+        Uri localUri = lookupLocalUriByName(entry.fileName());
+        if (localUri != null) {
+            return synthLocalFavorite(entry, localUri);
+        }
+
+        // 3) NAS 파일 — 단말 무관 스트리밍
+        if (entry.nasPath != null) {
+            return synthNasFavorite(entry);
+        }
+
+        // 4) 다른 단말의 로컬 파일이고 이 단말에 없음 → skip
+        return null;
+    }
+
+    /** MediaStore에서 DISPLAY_NAME 일치하는 첫 비디오 URI. */
+    private Uri lookupLocalUriByName(String fileName) {
+        try (Cursor c = getContentResolver().query(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                new String[]{ MediaStore.Video.Media._ID },
+                MediaStore.Video.Media.DISPLAY_NAME + " = ?",
+                new String[]{ fileName }, null)) {
+            if (c != null && c.moveToFirst()) {
+                return ContentUris.withAppendedId(
+                        MediaStore.Video.Media.EXTERNAL_CONTENT_URI, c.getLong(0));
+            }
+        } catch (Exception e) {
+            Log.w("FileList", "lookupLocalUriByName 오류: " + e.getMessage());
+        }
+        return null;
+    }
+
+    /** NAS 스냅샷 세팅 + 즐겨찾기 탭 열려있으면 재갱신. 메인 스레드에서 호출. */
+    private void setNasSnapshot(Favorite f) {
+        ResumeSnapshot.nas = f;
+        Runnable cb = ResumeSnapshot.onUpdate;
+        if (cb != null) cb.run();
+    }
+
+    /** NasResumeEntry → 로컬 Favorite (이 단말 MediaStore에 파일이 있는 경우). */
+    private Favorite synthLocalFavorite(NasSyncManager.NasResumeEntry entry, Uri localUri) {
+        Favorite f = new Favorite();
+        f.uri        = localUri.toString();
+        f.name       = entry.fileName();
+        f.isNas      = false;
+        f.positionMs = entry.positionMs;
+        f.addedAt    = entry.updatedAt;
+        f.isRecent   = true;
+        // bucketId는 모르므로 null — playFavoriteLocal → startLocalWithFolderView에서 MediaStore 재조회로 복구
+        return f;
+    }
+
+    /** NasResumeEntry → NAS 스트리밍 Favorite (nasPath 필수). */
+    private Favorite synthNasFavorite(NasSyncManager.NasResumeEntry entry) {
+        Favorite f = new Favorite();
+        f.uri        = DsFileApiClient.getCanonicalUrl(entry.nasPath);
+        f.name       = entry.fileName();
+        f.isNas      = true;
+        f.nasPath    = entry.nasPath;
+        f.positionMs = entry.positionMs;
+        f.addedAt    = entry.updatedAt;
+        f.isRecent   = true;
+        return f;
     }
 
     /** playback_position → 합성 Favorite (빨간 별표 "마지막 재생" 항목). */
@@ -1027,6 +1157,8 @@ public class FileListActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        // 이 Activity 인스턴스를 참조하는 onUpdate 람다가 남아있으면 NAS 늦은 콜백에서 dead Activity를 호출할 수 있음
+        ResumeSnapshot.onUpdate = null;
         dbExecutor.shutdown();
     }
 }

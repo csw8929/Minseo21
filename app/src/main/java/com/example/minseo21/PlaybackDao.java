@@ -19,6 +19,9 @@ public interface PlaybackDao {
     @Query("SELECT * FROM playback_position WHERE uri LIKE 'http%' ORDER BY updatedAt DESC LIMIT 1")
     PlaybackPosition getLastNasPosition();
 
+    @Query("SELECT * FROM playback_position WHERE name = :name ORDER BY updatedAt DESC LIMIT 1")
+    PlaybackPosition getLastPositionByName(String name);
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     void savePosition(PlaybackPosition position);
 

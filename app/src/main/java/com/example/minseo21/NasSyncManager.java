@@ -100,6 +100,40 @@ public class NasSyncManager {
         }
     }
 
+    /**
+     * positions.json 전체를 updatedAt DESC 순으로 NasResumeEntry 리스트로 반환.
+     *
+     * 즐겨찾기 "빨간 별표 NAS" 캡처 시 이 리스트를 순서대로 돌면서
+     * 이 단말에서 실제로 재생 가능한 첫 항목을 채택한다 (FileListActivity에서 사용).
+     * "재생 가능"의 판정은 호출자가 결정 — Room DB / MediaStore / nasPath 모두 고려하기 위해
+     * 여기선 필터를 걸지 않고 원본 순서대로 돌려준다.
+     */
+    public static java.util.List<NasResumeEntry> listEntriesDescending(JSONObject positions) {
+        java.util.List<NasResumeEntry> out = new java.util.ArrayList<>();
+        if (positions == null || positions.length() == 0) return out;
+        try {
+            Iterator<String> it = positions.keys();
+            while (it.hasNext()) {
+                String key = it.next();
+                JSONObject e = positions.optJSONObject(key);
+                if (e == null) continue;
+                String np = e.optString("nasPath", null);
+                if (np != null && np.isEmpty()) np = null;
+                String did = e.optString("deviceId", null);
+                if (did != null && did.isEmpty()) did = null;
+                out.add(new NasResumeEntry(key, np,
+                        e.optLong("positionMs", 0),
+                        e.optLong("updatedAt", 0),
+                        did));
+            }
+            java.util.Collections.sort(out,
+                    (a, b) -> Long.compare(b.updatedAt, a.updatedAt));
+        } catch (Exception ex) {
+            Log.d(TAG, "listEntriesDescending 오류: " + ex.getMessage());
+        }
+        return out;
+    }
+
     public NasSyncManager(Context context, ExecutorService dbExecutor) {
         this.context    = context.getApplicationContext();
         this.dbExecutor = dbExecutor;
