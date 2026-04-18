@@ -2,6 +2,7 @@ package com.example.minseo21;
 
 import android.app.AlertDialog;
 import android.content.ContentResolver;
+import android.content.Context;
 import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
 import android.database.Cursor;
@@ -9,7 +10,6 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
 import android.util.Log;
 import android.view.MotionEvent;
@@ -40,9 +40,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.atomic.AtomicInteger;
 
-public class MainActivity extends AppCompatActivity implements IVLCVout.Callback {
+public class MainActivity extends AppCompatActivity implements IVLCVout.Callback, PlaybackHost {
 
     private static final int CONTROLS_HIDE_DELAY_MS = 3000;
     private static final String TAG = "SACH";
@@ -51,7 +50,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
 
     private LibVLC libVLC;
     private MediaPlayer mediaPlayer;
-    private ParcelFileDescriptor pfd;
+    private PlaybackSource currentSource;
     private boolean tracksLogged = false;
     private int videoW = 0, videoH = 0;
 
@@ -72,11 +71,8 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     private NasSyncManager nasSyncManager;
     private java.util.concurrent.Future<?> nasFlushing;
 
-    // HLS 트랜스코딩 세션 상태 — 셀룰러 환경에서 NAS 파일 재생 시 사용
+    // 셀룰러 환경에서 NAS 파일 HLS 트랜스코딩 사용 여부 (FileListActivity 가 Intent extra 로 지정)
     private boolean useTranscode = false;
-    private String currentStreamId = null;
-    private String currentFormat = null;
-    private final AtomicInteger hlsEpoch = new AtomicInteger(0);
 
     private long pendingSeekMs       = -1;
     private int  pendingSubtitleId   = Integer.MIN_VALUE;
@@ -254,98 +250,36 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         }
     }
 
-    /** NAS 파일이면 canonical URL, 로컬이면 URI 문자열 그대로 반환.
-     *  Playlist에 canonicalUri가 없으면 NAS 스트림 URL에서 _sid를 제거한 canonical을 재구성.
-     *  (세션간 _sid 누적 방지) */
-    private String resolveDbKey(Uri uri) {
-        if (PlaylistHolder.playlist != null && PlaylistHolder.currentIndex >= 0) {
-            VideoItem vi = PlaylistHolder.playlist.get(PlaylistHolder.currentIndex);
-            if (vi.canonicalUri != null) return vi.canonicalUri;
-        }
-        // NAS 스트림 URL이면 canonical로 정규화 (_sid 누적 방지)
-        return DsFileApiClient.toCanonicalUrl(uri.toString());
-    }
-
-    /**
-     * NAS 위치 캐시 키 생성: "{폴더명}/{파일명}"
-     * - NAS 파일: nasPath의 마지막 두 세그먼트 (/video/드라마/ep01.mkv → 드라마/ep01.mkv)
-     * - 로컬 파일: bucketDisplayName + "/" + name
-     * - fallback: 파일명만
-     */
-    /**
-     * NAS syncKey = 파일명만 (폴더 무관).
-     * A/B 단말이 같은 파일을 다른 폴더에서 재생할 수 있으므로, 크로스 디바이스 매칭은 파일명 기준.
-     */
-    private String deriveSyncKey() {
-        if (PlaylistHolder.playlist != null && PlaylistHolder.currentIndex >= 0) {
-            VideoItem item = PlaylistHolder.playlist.get(PlaylistHolder.currentIndex);
-            // NAS 파일: nasPath의 마지막 세그먼트 (파일명)
-            if (item.nasPath != null && !item.nasPath.isEmpty()) {
-                String[] parts = item.nasPath.split("/");
-                String name = parts[parts.length - 1];
-                if (!name.isEmpty()) return name;
-            }
-            // 로컬 파일: name
-            if (item.name != null && !item.name.isEmpty()) return item.name;
-        }
-        // Intent로 직접 열린 경우 → 파일 URI의 마지막 세그먼트
-        if (currentTitle != null && !currentTitle.isEmpty()) return currentTitle;
-        return "";
-    }
-
     private void initPlayer(VLCVideoLayout videoLayout, Uri videoUri) {
-        currentUriKey  = videoUri.toString();
-        currentDbKey   = resolveDbKey(videoUri);
-        currentSyncKey = deriveSyncKey();
+        VideoItem item = null;
+        if (PlaylistHolder.playlist != null && PlaylistHolder.currentIndex >= 0
+                && PlaylistHolder.currentIndex < PlaylistHolder.playlist.size()) {
+            item = PlaylistHolder.playlist.get(PlaylistHolder.currentIndex);
+        }
+        initPlayer(videoLayout, PlaybackSource.from(videoUri, item, currentTitle, useTranscode));
+    }
+
+    private void initPlayer(VLCVideoLayout videoLayout, PlaybackSource source) {
+        // 이전 소스 정리 (HLS 세션, pfd 등)
+        if (currentSource != null && currentSource != source) currentSource.onStop();
+
         // NAS flush 타이머 시작 (중복 제거 후 재등록)
         handler.removeCallbacks(nasFlushTask);
         handler.postDelayed(nasFlushTask, NAS_FLUSH_INTERVAL_MS);
 
-        boolean isNetwork = "http".equals(videoUri.getScheme()) || "https".equals(videoUri.getScheme());
-
         ArrayList<String> options = new ArrayList<>();
         // HW 디코더: mediacodec_ndk(NDK) → mediacodec_jni(JNI) → 소프트웨어 순서로 시도
         options.add("--codec=mediacodec_ndk,mediacodec_jni,none");
-        // 색심도: RV32 (32bit, 고색 재현). RV16보다 메모리 대역폭 2× 사용.
-        // VLCVideoLayout은 TextureView 기반 → --vout=android-display 사용 불가 (충돌)
+        // 색심도: RV32 (32bit, 고색 재현). VLCVideoLayout(TextureView) → --vout=android-display 충돌
         options.add("--android-display-chroma=RV32");
-        // -1(auto): 인터레이스 콘텐츠(구형 AVI 등) 자동 감지. 0(off)이면 인터레이스 AVI가 흐릿하게 보임
+        // -1(auto): 인터레이스 콘텐츠(구형 AVI) 자동 감지
         options.add("--deinterlace=-1");
         options.add("--aout=opensles");
-        // SW 디코더 스레드 수: Xvid/DivX 등 HW 가속 불가 코덱의 소프트웨어 폴백 성능 향상
+        // SW 디코더 스레드 수: Xvid/DivX 등 HW 가속 불가 코덱 성능 향상
         options.add("--avcodec-threads=4");
-        // 릴레이 연결 여부: direct.quickconnect.to 또는 quickconnect.to 경유 시 레이턴시 높음
-        boolean isRelay = isNetwork && DsFileApiClient.isRelayUrl(videoUri.toString());
-        // 캐싱: 로컬 500ms / NAS 5000ms / 릴레이 45000ms
-        // 릴레이(대만 서버 경유)는 RTT ~560ms + 대역폭 제한 → 45초 선버퍼
-        options.add(isRelay ? "--network-caching=45000" : isNetwork ? "--network-caching=5000" : "--file-caching=500");
-        options.add("--live-caching=300");
-        if (isNetwork) {
-            // NAS 스트리밍: 클럭 지터 허용 + 동기화 활성화
-            // AVI 컨테이너는 타이밍 메타데이터가 부정확해 jitter=0/synchro=0이면
-            // SurfaceTexture 버퍼 슬롯 고갈(BufferQueueProducer timeout) 발생
-            // 릴레이: RTT ~560ms → jitter=2000 으로 클록 리셋 방지
-            options.add(isRelay ? "--clock-jitter=2000" : "--clock-jitter=500");
-            if (isRelay) {
-                // 릴레이 연결 끊김 시 자동 재연결
-                options.add("--http-reconnect");
-            }
-        } else {
-            options.add("--clock-jitter=0");
-            options.add("--clock-synchro=0");
-        }
-        // NOTE: --no-drop-late-frames / --no-skip-frames 제거.
-        // 위 두 옵션은 "프레임 절대 드롭 금지"로 지연 누적 시 회복 불가 → 끊김 주 원인
-        // NOTE: --no-audio-time-stretch 제거 (네트워크용).
-        // AVI 오디오 헤더가 불량(0Hz)일 때 time-stretch 비활성화 시 오디오 초기화 실패 →
-        // A/V 동기 파이프라인 중단 → 프레임 스탈 유발
-        if (!isNetwork) {
-            options.add("--no-audio-time-stretch");
-        }
+        source.addVlcOptions(options);
         options.add("--input-fast-seek");
-        if (subtitleMargin > 0) {
-            options.add("--sub-margin=" + subtitleMargin);
-        }
+        if (subtitleMargin > 0) options.add("--sub-margin=" + subtitleMargin);
 
         libVLC = new LibVLC(this, options);
         mediaPlayer = new MediaPlayer(libVLC);
@@ -353,113 +287,43 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         mediaPlayer.getVLCVout().addCallback(this);
         mediaPlayer.setEventListener(event -> runOnUiThread(() -> handleVlcEvent(event)));
 
-        loadSavedPosition(currentDbKey);
-
-        if (useTranscode && PlaylistHolder.playlist != null && PlaylistHolder.currentIndex >= 0) {
-            // 셀룰러: HLS 트랜스코딩 세션 오픈 후 m3u8 재생
-            VideoItem item = PlaylistHolder.playlist.get(PlaylistHolder.currentIndex);
-            startHlsPlayback(item);
-        } else {
-            // WiFi / 로컬 파일 → 직접 재생
-            Media media = openMedia(videoUri);
-            if (media == null) {
-                loadingBar.setVisibility(View.GONE);
-                errorText.setVisibility(View.VISIBLE);
-                errorText.setText("파일을 열 수 없습니다.");
-                return;
-            }
-            mediaPlayer.setMedia(media);
-            media.release();
-            tryAddExternalSubtitles(videoUri);
-            mediaPlayer.play();
-        }
+        beginPlayback(source);
     }
 
-    /**
-     * HLS 트랜스코딩으로 재생. findFileId → openTranscodeStream → mediaPlayer.play 순.
-     * 재호출 시 이전 세션은 닫고(race 방지 위해 epoch 검사) 새 세션을 연다.
-     * 실패 시 errorText 표시.
-     */
-    private void startHlsPlayback(VideoItem item) {
-        if (item == null || item.nasPath == null || item.nasPath.isEmpty()) {
-            showError("NAS 경로 없음");
-            return;
-        }
-        // 이전 세션 종료 (fire-and-forget)
-        closeCurrentTranscodeSession();
-        final int epoch = hlsEpoch.incrementAndGet();
+    /** 현재 MediaPlayer 를 유지한 채 소스만 교체해 재생 시작. (플레이리스트 이동/초기화 공용) */
+    private void beginPlayback(PlaybackSource source) {
+        currentSource  = source;
+        currentDbKey   = source.canonicalKey;
+        currentSyncKey = source.syncKey;
+        loadSavedPosition(currentDbKey);
+
         loadingBar.setVisibility(View.VISIBLE);
         errorText.setVisibility(View.GONE);
 
-        DsFileApiClient.findFileIdForSharePath(item.nasPath, new DsFileApiClient.Callback<Integer>() {
-            @Override public void onResult(Integer fileId) {
-                if (epoch != hlsEpoch.get()) return;
-                DsFileApiClient.openTranscodeStream(fileId, "hls_remux",
-                        new DsFileApiClient.Callback<DsFileApiClient.TranscodeSession>() {
-                    @Override public void onResult(DsFileApiClient.TranscodeSession s) {
-                        if (epoch != hlsEpoch.get()) {
-                            // 이미 다음 요청이 시작됨 → 방금 연 세션 바로 닫기
-                            DsFileApiClient.closeTranscodeStream(s.streamId, s.format);
-                            return;
-                        }
-                        currentStreamId = s.streamId;
-                        currentFormat = s.format;
-                        currentUriKey = s.hlsUrl;
-                        Uri hlsUri = Uri.parse(s.hlsUrl);
-                        Media media = openMedia(hlsUri);
-                        if (media == null) {
-                            showError("HLS 스트림을 열 수 없습니다");
-                            return;
-                        }
-                        mediaPlayer.setMedia(media);
-                        media.release();
-                        tryAddNasSubtitles();
-                        mediaPlayer.play();
-                    }
-                    @Override public void onError(String msg) {
-                        if (epoch != hlsEpoch.get()) return;
-                        showError("HLS 세션 실패: " + msg);
-                    }
-                });
+        source.prepare(this, new PlaybackSource.MediaReadyCallback() {
+            @Override public void onReady(Media media, String playingUri) {
+                // 콜백 도달 시점에 이미 다른 소스로 전환됐을 수 있음 → 방어
+                if (currentSource != source || mediaPlayer == null) {
+                    media.release();
+                    return;
+                }
+                currentUriKey = playingUri;
+                mediaPlayer.setMedia(media);
+                media.release();
+                source.loadSubtitles(MainActivity.this);
+                mediaPlayer.play();
             }
             @Override public void onError(String msg) {
-                if (epoch != hlsEpoch.get()) return;
-                showError("file_id 조회 실패: " + msg);
+                if (currentSource != source) return;
+                showError(msg);
             }
         });
     }
 
-    /** 현재 열려 있는 트랜스코딩 세션을 닫는다. (fire-and-forget) */
-    private void closeCurrentTranscodeSession() {
-        if (currentStreamId != null) {
-            DsFileApiClient.closeTranscodeStream(currentStreamId, currentFormat);
-            currentStreamId = null;
-            currentFormat = null;
-        }
-    }
-
-    /**
-     * NAS 스트림/캐노니컬 URL 에서 파일 경로 추출.
-     * 예: ...&path=%2Fvideo%2Ffoo.mkv&... → "/video/foo.mkv"
-     * NAS URL 이 아니거나 path 파라미터 없으면 null.
-     */
-    private static String extractNasPathFromUri(Uri uri) {
-        if (!DsFileApiClient.isNasUrl(uri.toString())) return null;
-        String path = uri.getQueryParameter("path");
-        return (path != null && !path.isEmpty()) ? path : null;
-    }
-
-    private void tryAddExternalSubtitles(Uri videoUri) {
-        String scheme = videoUri.getScheme();
-
-        // ── NAS 스트림: PlaylistHolder에서 nasPath 추출 후 비동기 자막 탐색 ──
-        if ("http".equals(scheme) || "https".equals(scheme)) {
-            tryAddNasSubtitles();
-            return;
-        }
-
-        // ── 로컬 content:// ──
-        if (!"content".equals(scheme)) return;
+    /** 로컬 content:// 자막 자동 탐색 (MediaStore bucket scan). PlaybackHost. */
+    @Override
+    public void scanLocalSubtitles(Uri videoUri) {
+        if (!"content".equals(videoUri.getScheme())) return;
 
         // Fast single-row query on main thread to get metadata
         String videoPath = null;
@@ -557,17 +421,9 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         });
     }
 
-    /**
-     * NAS 재생 시 같은 폴더의 자막 파일 자동 탐색.
-     * PlaylistHolder에서 현재 항목의 nasPath를 읽어 폴더를 listFolder.
-     */
-    private void tryAddNasSubtitles() {
-        if (PlaylistHolder.playlist == null
-                || PlaylistHolder.currentIndex < 0
-                || PlaylistHolder.currentIndex >= PlaylistHolder.playlist.size()) return;
-
-        VideoItem current = PlaylistHolder.playlist.get(PlaylistHolder.currentIndex);
-        String nasPath = current.nasPath;
+    /** NAS 재생 시 같은 폴더의 자막 파일 자동 탐색. PlaybackHost. */
+    @Override
+    public void loadNasSubtitles(String nasPath) {
         if (nasPath == null || nasPath.isEmpty()) return;
 
         String sid = DsFileApiClient.getCachedSid();
@@ -576,9 +432,10 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         String nasFolder = nasPath.contains("/")
                 ? nasPath.substring(0, nasPath.lastIndexOf('/'))
                 : nasPath;
-        String videoName = current.name != null ? current.name : "";
-        int lastDot = videoName.lastIndexOf('.');
-        String baseName = (lastDot > 0) ? videoName.substring(0, lastDot) : videoName;
+        String[] parts = nasPath.split("/");
+        String fileName = parts[parts.length - 1];
+        int lastDot = fileName.lastIndexOf('.');
+        String baseName = (lastDot > 0) ? fileName.substring(0, lastDot) : fileName;
         String[] subExts = {".smi", ".srt", ".SMI", ".SRT", ".ass", ".ssa"};
 
         Log.d(TAG, "[Sub] NAS 자막 탐색: 폴더=" + nasFolder + ", 기준파일=" + baseName);
@@ -712,29 +569,6 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         }
     }
 
-    private Media openMedia(Uri uri) {
-        String scheme = uri.getScheme();
-        Media media;
-        if ("content".equals(scheme)) {
-            try {
-                pfd = getContentResolver().openFileDescriptor(uri, "r");
-                if (pfd == null) throw new Exception("openFileDescriptor returned null");
-                media = new Media(libVLC, pfd.getFileDescriptor());
-            } catch (Exception e) {
-                Log.e(TAG, "content:// open failed", e);
-                // PFD 누수 방지: new Media() 가 throw 해도 pfd 는 열려 있을 수 있음
-                if (pfd != null) {
-                    try { pfd.close(); } catch (Exception ignored) {}
-                    pfd = null;
-                }
-                return null;
-            }
-        } else {
-            media = new Media(libVLC, uri);
-        }
-        return media;
-    }
-
     private void handleVlcEvent(MediaPlayer.Event event) {
         switch (event.type) {
             case MediaPlayer.Event.Opening:
@@ -823,7 +657,6 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
                     loadingBar.setVisibility(View.VISIBLE);
                     errorText.setVisibility(View.GONE);
                     final long resumePos = mediaPlayer != null ? mediaPlayer.getTime() : 0;
-                    final String dbKey = currentDbKey;
                     final String nasFilePath = (PlaylistHolder.playlist != null
                             && PlaylistHolder.currentIndex >= 0)
                             ? PlaylistHolder.playlist.get(PlaylistHolder.currentIndex).nasPath
@@ -836,13 +669,13 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
                                 return;
                             }
                             String newStream = DsFileApiClient.getStreamUrl(nasFilePath, newSid);
-                            currentUriKey = newStream;
                             if (resumePos > 0) pendingSeekMs = resumePos;
-                            // 플레이리스트 항목도 갱신
+                            VideoItem updatedItem = null;
                             if (PlaylistHolder.playlist != null && PlaylistHolder.currentIndex >= 0) {
                                 VideoItem old = PlaylistHolder.playlist.get(PlaylistHolder.currentIndex);
-                                PlaylistHolder.playlist.set(PlaylistHolder.currentIndex,
-                                        VideoItem.nasFileWithStream(old.name, old.nasPath, newStream, old.canonicalUri));
+                                updatedItem = VideoItem.nasFileWithStream(
+                                        old.name, old.nasPath, newStream, old.canonicalUri);
+                                PlaylistHolder.playlist.set(PlaylistHolder.currentIndex, updatedItem);
                             }
                             // 기존 libVLC/mediaPlayer 해제 후 재초기화 (메모리 누수 방지)
                             if (mediaPlayer != null) {
@@ -855,7 +688,10 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
                                 libVLC.release();
                                 libVLC = null;
                             }
-                            initPlayer(videoLayout, Uri.parse(newStream));
+                            // 복구 경로: HLS 우회, 항상 직결 스트림
+                            PlaybackSource recovery = PlaybackSource.from(
+                                    Uri.parse(newStream), updatedItem, currentTitle, false);
+                            initPlayer(videoLayout, recovery);
                         }
                         @Override public void onError(String msg) {
                             if (!isFinishing() && !isDestroyed()) showError("NAS 재연결 실패: " + msg);
@@ -896,28 +732,8 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         mediaPlayer.setScale(0f);
         updateNavButtons();
 
-        if (pfd != null) {
-            try { pfd.close(); } catch (Exception ignored) {}
-            pfd = null;
-        }
-
-        currentDbKey   = item.canonicalUri != null ? item.canonicalUri : item.uri.toString();
-        currentSyncKey = deriveSyncKey();
-        loadSavedPosition(currentDbKey);
-
-        if (useTranscode && item.nasPath != null) {
-            startHlsPlayback(item);
-        } else {
-            // WiFi / 로컬 파일 → 직접 재생
-            currentUriKey = item.uri.toString();
-            Media media = openMedia(item.uri);
-            if (media != null) {
-                mediaPlayer.setMedia(media);
-                media.release();
-                tryAddExternalSubtitles(item.uri);
-                mediaPlayer.play();
-            }
-        }
+        if (currentSource != null) currentSource.onStop();
+        beginPlayback(PlaybackSource.from(item.uri, item, item.name, useTranscode));
     }
 
     private void updateNavButtons() {
@@ -1319,10 +1135,6 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             libVLC.release();
             libVLC = null;
         }
-        if (pfd != null) {
-            try { pfd.close(); } catch (Exception ignored) {}
-            pfd = null;
-        }
 
         // dbExecutor는 단일 스레드이므로 saveCurrentPosition의 DB 쓰기 완료 후
         // initPlayer 내부의 loadSavedPosition이 올바른 위치/트랙을 읽어옴
@@ -1451,18 +1263,19 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         super.onDestroy();
         handler.removeCallbacksAndMessages(null);
         saveCurrentPosition();
-        // HLS 세션 누수 방지 — 플레이어 해제 전에 닫기 (epoch 바꿔 콜백 진입도 차단)
-        hlsEpoch.incrementAndGet();
-        closeCurrentTranscodeSession();
+        // 플레이어 해제 전 소스 정리 (HLS 세션 close, pfd close)
+        if (currentSource != null) { currentSource.onStop(); currentSource = null; }
         if (mediaPlayer != null) {
             mediaPlayer.getVLCVout().removeCallback(this);
             mediaPlayer.detachViews();
             mediaPlayer.release();
         }
         if (libVLC != null) libVLC.release();
-        if (pfd != null) {
-            try { pfd.close(); } catch (Exception ignored) {}
-        }
         dbExecutor.shutdown();
     }
+
+    // ── PlaybackHost ────────────────────────────────────────────────────────
+    @Override public Context getContext() { return this; }
+    @Override public LibVLC getLibVLC() { return libVLC; }
+    @Override public MediaPlayer getMediaPlayer() { return mediaPlayer; }
 }
