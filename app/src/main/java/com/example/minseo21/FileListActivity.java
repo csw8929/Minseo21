@@ -819,15 +819,22 @@ public class FileListActivity extends AppCompatActivity {
         final String thisDeviceId = android.provider.Settings.Secure.getString(
                 getContentResolver(), android.provider.Settings.Secure.ANDROID_ID);
         // DB / MediaStore 조회가 포함되므로 dbExecutor에서 순회
-        dbExecutor.execute(() -> {
-            for (NasSyncManager.NasResumeEntry entry : candidates) {
-                Favorite f = tryCaptureOne(entry, thisDeviceId);
-                if (f != null) {
-                    runOnUiThread(() -> setNasSnapshot(f));
-                    return;
+        // onDestroy → dbExecutor.shutdown() 이후 NAS 콜백이 늦게 도착하면
+        // execute()가 RejectedExecutionException을 던지므로 방어.
+        if (dbExecutor.isShutdown()) return;
+        try {
+            dbExecutor.execute(() -> {
+                for (NasSyncManager.NasResumeEntry entry : candidates) {
+                    Favorite f = tryCaptureOne(entry, thisDeviceId);
+                    if (f != null) {
+                        runOnUiThread(() -> setNasSnapshot(f));
+                        return;
+                    }
                 }
-            }
-        });
+            });
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            // Activity가 이미 destroy된 경우 — 이 세션의 NAS 스냅샷은 캡처 안 함
+        }
     }
 
     /** 한 항목을 이 단말에서 재생 가능한 Favorite으로 합성 시도. 불가능하면 null. */
