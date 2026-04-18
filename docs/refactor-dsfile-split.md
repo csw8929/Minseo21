@@ -102,3 +102,51 @@ DsAuth ──→ DsHttp, DsFileStation.clearFileIdCache
 ./gradlew assembleDebug
 BUILD SUCCESSFUL in 2s
 ```
+
+---
+
+# 이슈 로그
+
+세션 중 발견/수정된 버그. 최신 순.
+
+## ISSUE-001 — 5G/외부망에서 NAS 접속 실패 (QuickConnect URL 잔존)
+
+**발견**: 2026-04-18
+**해결**: 2026-04-18
+**상태**: 해결됨 (UI 재설정)
+
+### 증상
+- 5G 셀룰러 환경에서 NAS 탭 접근 시 즉시 에러:
+  ```
+  연결 실패: NAS 연결 오류: Value <!doctype of type java.lang.String cannot be converted to JSONObject
+  ```
+- WiFi→5G 전환 후에도 동일 증상 지속.
+
+### 원인
+`NasCredentialStore` 에 저장된 `baseUrl` 이 QuickConnect 포털 URL
+(`https://gomji17.tw3.quickconnect.to`). logcat:
+```
+외부 연결: https://gomji17.tw3.quickconnect.to
+HTTP 307 → http://gomji17.quickconnect.to/webapi/auth.cgi...    (HTTPS→HTTP 다운그레이드)
+HTTP 200 ← <!doctype html...                                     (포털 HTML)
+JSONException: Value <!doctype of type java.lang.String cannot be converted to JSONObject
+```
+
+메모리 기록대로 `gomji17.quickconnect.to` 는 포털 HTML 만 반환 —
+릴레이 핸드셰이크 없이는 실제 DSM 에 도달 불가. 릴레이 코드는 이미 제거됨
+(사용자 지시 "Relay 관련 코드는 모두 제거해줘"). 구 prefs 값이 잔존한 것.
+
+### 해결
+앱 메뉴 → **NAS 설정** → "기본 URL" 필드를 DDNS 로 교체:
+```
+https://gomji17.synology.me:5001
+```
+- SK 브로드밴드 포트포워딩 5000/5001 오픈 완료 (2026-04-17, 메모리 기록)
+- 공인 IP 직결 또는 DDNS 어느 쪽이든 HTTPS 리스너로 JSON 응답 받음
+
+### 후속
+- **코드 가드 추가 여부**: `DsAuth.login()` 에서 `quickconnect.to` 감지 시
+  명시 에러로 조기 실패 (미적용 — UI 재설정으로 우선 해결).
+- **마이그레이션**: 기존 사용자도 같은 stale prefs 가능 → 앱 첫 실행 시
+  `NasCredentialStore.getBaseUrl()` 이 quickconnect.to 포함이면 자동으로
+  `DsFileConfig.BASE_URL` fallback 로 덮어쓰는 것도 고려.
