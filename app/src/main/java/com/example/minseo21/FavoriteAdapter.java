@@ -46,7 +46,7 @@ public class FavoriteAdapter extends RecyclerView.Adapter<FavoriteAdapter.ViewHo
     @Override
     public void onBindViewHolder(@NonNull ViewHolder h, int position) {
         Favorite f = items.get(position);
-        String prefix = f.isNas ? "[REMOTE] " : "[LAST] ";
+        String prefix = (f.isRemoteSlot || f.isNas) ? "[REMOTE] " : "[LAST] ";
         h.tvName.setText(prefix + (f.name != null ? f.name : "(제목 없음)"));
         h.ivIcon.setImageResource(f.isRecent ? R.drawable.ic_star_red : R.drawable.ic_star_yellow);
         String meta = formatTime(f.positionMs) + "  |  " + dateFormat.format(new Date(f.addedAt));

@@ -812,11 +812,14 @@ public class FileListActivity extends AppCompatActivity {
     /**
      * NAS positions.json 결과로 REMOTE 슬롯 스냅샷을 갱신.
      *
-     * REMOTE 의미: positions.json에서 updatedAt이 가장 큰 NAS-backed 항목 1개.
-     * 단말 일치 / 로컬 재생 가능 여부 무관 — LAST 슬롯이 이 단말의 로컬 최신을 이미 커버한다.
+     * REMOTE 의미: positions.json에서 "이 단말이 아닌 다른 단말"이 올린 항목 중 updatedAt이 가장 큰 1개.
+     *   - nasPath 있음  → NAS 스트리밍 Favorite
+     *   - nasPath 없음  → 다른 단말의 로컬 재생 기록. 이 단말 MediaStore에 동일 이름 파일이 있으면
+     *                     로컬로 재생 가능 (isNas=false). 없으면 skip → 다음 candidate.
+     * 이 단말의 entry는 LAST 슬롯이 이미 커버하므로 제외한다 (deviceId 일치 시 skip).
+     * deviceId가 null인 legacy entry는 타 단말 가정으로 포함 (보수적 노출).
      *
-     * nasPath가 있는 항목이 하나도 없으면 REMOTE 슬롯을 비운다 (stale 유지 방지).
-     * 매 호출마다 덮어쓴다.
+     * 전부 skip되면 REMOTE 슬롯을 비운다. 매 호출마다 덮어쓴다.
      */
     private void captureNasSnapshot(JSONObject positions) {
         java.util.List<NasSyncManager.NasResumeEntry> candidates =
@@ -825,13 +828,15 @@ public class FileListActivity extends AppCompatActivity {
             runOnUiThread(() -> setNasSnapshot(null));
             return;
         }
+        final String myDeviceId = NasSyncManager.getInstance(this).getDeviceId();
         // dbExecutor가 아직 살아있으면 사용 — 과거 경로 호환 위해 유지.
-        // 실제로 Room/MediaStore 조회는 제거됐지만 onDestroy → shutdown 경계는 그대로 존중.
+        // tryCaptureOne이 MediaStore를 조회할 수 있으므로 백그라운드 유지.
         if (dbExecutor.isShutdown()) return;
         try {
             dbExecutor.execute(() -> {
                 Favorite picked = null;
                 for (NasSyncManager.NasResumeEntry entry : candidates) {
+                    if (entry.deviceId != null && entry.deviceId.equals(myDeviceId)) continue;
                     Favorite f = tryCaptureOne(entry);
                     if (f != null) { picked = f; break; }
                 }
@@ -843,10 +848,23 @@ public class FileListActivity extends AppCompatActivity {
         }
     }
 
-    /** NAS-backed 항목이면 스트리밍 Favorite으로, 아니면 null. */
+    /**
+     * 타 단말 positions.json entry → REMOTE 슬롯 Favorite.
+     *   - nasPath 있음: NAS 스트리밍으로 합성 (isNas=true)
+     *   - nasPath 없음: 이 단말 MediaStore에서 동일 이름 찾으면 로컬 합성 (isNas=false), 없으면 null
+     * 두 경우 모두 isRemoteSlot=true로 마킹 → UI는 [REMOTE] 프리픽스를 보여준다.
+     */
     private Favorite tryCaptureOne(NasSyncManager.NasResumeEntry entry) {
-        if (entry.nasPath == null) return null;
-        return synthNasFavorite(entry);
+        if (entry.nasPath != null) {
+            Favorite f = synthNasFavorite(entry);
+            f.isRemoteSlot = true;
+            return f;
+        }
+        Uri localUri = lookupLocalUriByName(entry.fileName());
+        if (localUri == null) return null;
+        Favorite f = synthLocalFavorite(entry, localUri);
+        f.isRemoteSlot = true;
+        return f;
     }
 
     /** MediaStore에서 DISPLAY_NAME 일치하는 첫 비디오 URI. */
