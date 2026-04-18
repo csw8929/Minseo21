@@ -159,7 +159,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        nasSyncManager = new NasSyncManager(this, dbExecutor);
+        nasSyncManager = NasSyncManager.getInstance(this);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         WindowInsetsControllerCompat insetsCtrl =
@@ -651,6 +651,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             case MediaPlayer.Event.Vout:
                 break;
             case MediaPlayer.Event.EncounteredError:
+                Log.e(TAG, "[Player] EncounteredError (URI=" + currentUriKey + ")");
                 if (DsFileApiClient.isNasUrl(currentUriKey)) {
                     // NAS 스트림 오류 → SID 재발급 후 재시도
                     Log.w(TAG, "[NAS] 스트림 오류, SID 재발급 시도");

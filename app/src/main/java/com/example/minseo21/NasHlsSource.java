@@ -1,20 +1,34 @@
 package com.example.minseo21;
 
 import android.net.Uri;
+import android.util.Log;
 
 import org.videolan.libvlc.Media;
 
+import java.io.File;
+import java.io.FileOutputStream;
 import java.util.List;
 
 /**
  * 셀룰러/원격에서 NAS 파일을 HLS remux 로 재생.
- * prepare() 는 비동기 — findFileId → openTranscodeStream → Media 생성.
- * onStop() 으로 세션 정리; 이후 들어오는 콜백은 stopped 플래그로 무시되고
- * 레이스 세션이 열렸다면 즉시 닫는다.
+ *
+ * VLC 의 libvlc TLS 스택은 Synology self-signed/만료 체인 인증서를 거부한다.
+ * 그리고 Synology 가 반환하는 m3u8 내 세그먼트 URL 은 무조건 HTTPS:5001 절대경로로
+ * 하드코딩되어 있어 VLC 가 세그먼트 fetch 시 TLS 핸드셰이크 실패.
+ *
+ * 따라서 prepare() 는:
+ *   1. openTranscodeStream 으로 stream_id + m3u8 URL 획득
+ *   2. DsHttp.httpGet 으로 m3u8 직접 GET (self-signed 허용)
+ *   3. 세그먼트 URL 을 HTTP:5000 으로 rewrite (포트 5000 은 포트포워딩 오픈됨)
+ *   4. 앱 캐시 디렉토리에 저장 후 file:// URL 을 VLC 에 전달
+ *
+ * VLC 는 file:// 로컬 playlist 를 읽고 rewrite 된 HTTP 세그먼트만 fetch → TLS 이슈 회피.
  */
 final class NasHlsSource extends PlaybackSource {
+    private static final String TAG = "NAS";
     private String streamId;
     private String format;
+    private File cachedPlaylist;
     private volatile boolean stopped = false;
 
     NasHlsSource(String canonicalKey, String syncKey, String nasPath) {
@@ -43,14 +57,40 @@ final class NasHlsSource extends PlaybackSource {
                         new DsFileApiClient.Callback<DsFileApiClient.TranscodeSession>() {
                     @Override public void onResult(DsFileApiClient.TranscodeSession s) {
                         if (stopped) {
-                            // 이미 중단됨 → 방금 연 세션 즉시 닫기 (누수 방지)
                             DsFileApiClient.closeTranscodeStream(s.streamId, s.format);
                             return;
                         }
                         streamId = s.streamId;
                         format = s.format;
-                        Media media = new Media(host.getLibVLC(), Uri.parse(s.hlsUrl));
-                        cb.onReady(media, s.hlsUrl);
+                        // m3u8 fetch + rewrite 는 I/O — 백그라운드 스레드에서
+                        DsAuth.executor.execute(() -> {
+                            try {
+                                String body = DsHttp.httpGet(s.hlsUrl);
+                                // 세그먼트 URL 내 https://<host>:5001/ → http://<host>:5000/ 일괄 치환
+                                String rewritten = body.replaceAll(
+                                        "https://([^/\\s]+):5001/",
+                                        "http://$1:5000/");
+                                File cacheDir = host.getContext().getCacheDir();
+                                File out = new File(cacheDir, "hls_" + s.streamId + ".m3u8");
+                                try (FileOutputStream fos = new FileOutputStream(out)) {
+                                    fos.write(rewritten.getBytes("UTF-8"));
+                                }
+                                cachedPlaylist = out;
+                                Log.i(TAG, "HLS playlist rewrite → " + out.getAbsolutePath()
+                                        + " (" + rewritten.length() + " bytes)");
+                                String fileUri = Uri.fromFile(out).toString();
+                                DsAuth.mainHandler.post(() -> {
+                                    if (stopped) return;
+                                    Media media = new Media(host.getLibVLC(), Uri.parse(fileUri));
+                                    cb.onReady(media, fileUri);
+                                });
+                            } catch (Exception e) {
+                                Log.w(TAG, "m3u8 fetch/rewrite 실패", e);
+                                DsAuth.mainHandler.post(() -> {
+                                    if (!stopped) cb.onError("m3u8 준비 실패: " + e.getMessage());
+                                });
+                            }
+                        });
                     }
                     @Override public void onError(String msg) {
                         if (stopped) return;
@@ -79,6 +119,12 @@ final class NasHlsSource extends PlaybackSource {
             DsFileApiClient.closeTranscodeStream(streamId, format);
             streamId = null;
             format = null;
+        }
+        if (cachedPlaylist != null) {
+            try { //noinspection ResultOfMethodCallIgnored
+                cachedPlaylist.delete();
+            } catch (Exception ignored) {}
+            cachedPlaylist = null;
         }
     }
 }

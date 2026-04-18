@@ -2,7 +2,6 @@ package com.example.minseo21;
 
 import android.util.Log;
 
-import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -84,13 +83,8 @@ final class DsHttp {
                 conn.disconnect();
                 throw new Exception("HTTP " + code + " — empty body");
             }
-            StringBuilder sb = new StringBuilder();
-            try (BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = br.readLine()) != null) sb.append(line);
-            }
+            String body = readAllUtf8(is);
             conn.disconnect();
-            String body = sb.toString();
             if (body.isEmpty()) throw new Exception("HTTP " + code + " — empty body");
             return body;
         }
@@ -142,13 +136,9 @@ final class DsHttp {
         Log.d(TAG, "HTTP POST-form " + code + " ← " + urlStr);
         InputStream is = (code < 400) ? conn.getInputStream() : conn.getErrorStream();
         if (is == null) { conn.disconnect(); return ""; }
-        StringBuilder sb = new StringBuilder();
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = br.readLine()) != null) sb.append(line);
-        }
+        String body = readAllUtf8(is);
         conn.disconnect();
-        return sb.toString();
+        return body;
     }
 
     static String httpPost(String urlStr, String jsonBody) throws Exception {
@@ -172,12 +162,19 @@ final class DsHttp {
 
         InputStream is = (code < 400) ? conn.getInputStream() : conn.getErrorStream();
         if (is == null) { conn.disconnect(); return ""; }
-        StringBuilder sb = new StringBuilder();
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = br.readLine()) != null) sb.append(line);
-        }
+        String body = readAllUtf8(is);
         conn.disconnect();
+        return body;
+    }
+
+    /** 응답 스트림을 UTF-8 로 완전히 읽어들인다. 줄바꿈(LF/CR) 을 보존해야 하는 HLS m3u8 등의 본문용. */
+    private static String readAllUtf8(InputStream is) throws Exception {
+        StringBuilder sb = new StringBuilder();
+        try (InputStreamReader reader = new InputStreamReader(is, StandardCharsets.UTF_8)) {
+            char[] buf = new char[8192];
+            int n;
+            while ((n = reader.read(buf)) != -1) sb.append(buf, 0, n);
+        }
         return sb.toString();
     }
 
@@ -242,11 +239,7 @@ final class DsHttp {
         InputStream ris = (resp < 400) ? conn.getInputStream() : conn.getErrorStream();
         String respBody = "";
         if (ris != null) {
-            StringBuilder sb = new StringBuilder();
-            try (BufferedReader br = new BufferedReader(new InputStreamReader(ris, StandardCharsets.UTF_8))) {
-                String l; while ((l = br.readLine()) != null) sb.append(l);
-            }
-            respBody = sb.toString();
+            respBody = readAllUtf8(ris);
         }
         conn.disconnect();
         if (resp >= 400) throw new Exception("upload HTTP " + resp + ": " + respBody);
