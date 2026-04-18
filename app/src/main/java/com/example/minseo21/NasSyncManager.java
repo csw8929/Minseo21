@@ -40,6 +40,15 @@ public class NasSyncManager {
     private final AtomicBoolean dirty = new AtomicBoolean(false);
     private final AtomicBoolean loading = new AtomicBoolean(false);
 
+    /** 마지막으로 성공한 positions.json fetch 시각 (ms). 0 = 미 로드. */
+    private volatile long lastFetchAt = 0;
+
+    /** onResume refresh TTL. 이 시간 이내면 재fetch skip. */
+    private static final long RESUME_REFRESH_TTL_MS = 5L * 60 * 1000;  // 5분
+
+    /** startup fetch 실패 시 백그라운드 재시도 간격. */
+    private static final long STARTUP_RETRY_MS = 30L * 1000;
+
     public interface PositionCallback {
         void onPosition(PlaybackPosition pos);
     }
@@ -159,6 +168,7 @@ public class NasSyncManager {
             @Override public void onResult(JSONObject positions) {
                 if (!fired.compareAndSet(false, true)) return; // 이중 콜백 방어
                 positionsCache = positions;
+                lastFetchAt = System.currentTimeMillis();
                 loading.set(false);
                 Log.d(TAG, "NAS 캐시 로드 완료: " + positions.length() + " 항목");
                 if (onDone != null) onDone.run();
@@ -168,7 +178,42 @@ public class NasSyncManager {
                 if (positionsCache == null) positionsCache = new JSONObject();
                 loading.set(false);
                 Log.d(TAG, "NAS 캐시 로드 실패 (로컬 모드): " + msg);
+                // 아직 한 번도 성공 못했으면 백그라운드 재시도 예약
+                if (lastFetchAt == 0) {
+                    mainHandler.postDelayed(() -> {
+                        if (lastFetchAt == 0 && DsFileApiClient.getCachedSid() != null) {
+                            loadAllPositionsFromNas(null);
+                        }
+                    }, STARTUP_RETRY_MS);
+                }
                 if (onDone != null) onDone.run();
+            }
+        });
+    }
+
+    /**
+     * 포그라운드 복귀(onResume) 시 호출. 마지막 성공 fetch로부터 TTL 경과한 경우에만 재로드.
+     * 재로드 결과는 현재 positionsCache와 mergePositions로 합쳐지므로
+     * 세션 중 dirty 쓰기는 유실되지 않음 (updatedAt 기준 승자 결정).
+     */
+    public void refreshIfStale() {
+        long now = System.currentTimeMillis();
+        if (now - lastFetchAt < RESUME_REFRESH_TTL_MS) return;
+        if (DsFileApiClient.getCachedSid() == null) return;
+        if (loading.get()) return;
+        if (!loading.compareAndSet(false, true)) return;
+
+        DsFileApiClient.downloadUserPositions(new DsFileApiClient.Callback<JSONObject>() {
+            @Override public void onResult(JSONObject remote) {
+                // 현재 캐시(세션 dirty 포함)를 remote 위에 병합 — 로컬이 더 최신이면 로컬 유지
+                positionsCache = mergePositions(remote, positionsCache);
+                lastFetchAt = System.currentTimeMillis();
+                loading.set(false);
+                Log.d(TAG, "NAS 캐시 refresh 완료: " + positionsCache.length() + " 항목");
+            }
+            @Override public void onError(String msg) {
+                loading.set(false);
+                Log.d(TAG, "NAS 캐시 refresh 실패 (기존 캐시 유지): " + msg);
             }
         });
     }
@@ -208,45 +253,23 @@ public class NasSyncManager {
      * NAS에 캐시 플러시. dirty 상태일 때만 업로드.
      * 30초 타이머 또는 onPause 에서 호출.
      *
-     * 덮어쓰기 방지: 기존 NAS 파일을 먼저 다운로드 → 로컬 캐시와 병합 (updatedAt 기준) → 업로드.
+     * Cache-first: positionsCache를 세션 내 진실로 간주, 다운로드 없이 바로 업로드.
+     * 다중 단말 동시 쓰기 시 늦게 쓴 쪽이 이김 (last-writer-wins). 드문 케이스로 허용.
      */
     public void flushToNas() {
         if (!dirty.compareAndSet(true, false)) return; // 변경 없으면 skip
-        JSONObject localSnapshot = positionsCache;
-        if (localSnapshot == null) return;
+        JSONObject snapshot = positionsCache;
+        if (snapshot == null) return;
         String sid = DsFileApiClient.getCachedSid();
         if (sid == null) { dirty.set(true); Log.w(TAG, "flushToNas skip: SID 없음"); return; }
 
-        // 1. 기존 NAS 파일 다운로드 후 병합 → 업로드
-        DsFileApiClient.downloadUserPositions(new DsFileApiClient.Callback<JSONObject>() {
-            @Override public void onResult(JSONObject remote) {
-                // 다운로드 완료 시점에 positionsCache에 새로 저장된 항목이 있을 수 있으므로
-                // remote + localSnapshot 병합 후 현재 캐시와 한 번 더 병합
-                JSONObject merged = mergePositions(mergePositions(remote, localSnapshot), positionsCache);
-                // 병합 결과를 로컬 캐시에도 반영 (다른 단말 항목 보존)
-                positionsCache = merged;
-                DsFileApiClient.uploadUserPositions(merged, new DsFileApiClient.Callback<Boolean>() {
-                    @Override public void onResult(Boolean ok) {
-                        Log.d(TAG, "NAS flush 성공: " + merged.length() + " 항목");
-                    }
-                    @Override public void onError(String msg) {
-                        dirty.set(true); // 실패 시 다음 flush에서 재시도
-                        Log.w(TAG, "NAS flush 실패: " + msg);
-                    }
-                });
+        DsFileApiClient.uploadUserPositions(snapshot, new DsFileApiClient.Callback<Boolean>() {
+            @Override public void onResult(Boolean ok) {
+                Log.d(TAG, "NAS flush 성공: " + snapshot.length() + " 항목");
             }
             @Override public void onError(String msg) {
-                // 다운로드 실패: 기존 파일 없다고 보고 로컬 캐시만 업로드
-                Log.d(TAG, "NAS flush - 기존 파일 없음, 로컬만 업로드: " + msg);
-                DsFileApiClient.uploadUserPositions(localSnapshot, new DsFileApiClient.Callback<Boolean>() {
-                    @Override public void onResult(Boolean ok) {
-                        Log.d(TAG, "NAS flush 성공(신규): " + localSnapshot.length() + " 항목");
-                    }
-                    @Override public void onError(String err) {
-                        dirty.set(true);
-                        Log.w(TAG, "NAS flush 실패: " + err);
-                    }
-                });
+                dirty.set(true); // 실패 시 다음 flush에서 재시도
+                Log.w(TAG, "NAS flush 실패: " + msg);
             }
         });
     }
@@ -289,25 +312,21 @@ public class NasSyncManager {
 
     /**
      * onPause 전용 블로킹 flush. 백그라운드 스레드에서 호출.
-     * download→merge→upload를 동기적으로 수행 (최대 ~5초 소요 가능).
+     * Cache-first: 다운로드 없이 업로드만 동기 수행.
      * dirty 아니면 skip. SID 없으면 skip.
      */
     public void flushToNasBlocking() {
         if (!dirty.compareAndSet(true, false)) return;
-        JSONObject localSnapshot = positionsCache;
-        if (localSnapshot == null) { dirty.set(true); return; }
-        String sid = DsFileApiClient.getCachedSid();
-        if (sid == null) { dirty.set(true); return; }
+        JSONObject snapshot = positionsCache;
+        if (snapshot == null) { dirty.set(true); return; }
+        if (DsFileApiClient.getCachedSid() == null) { dirty.set(true); return; }
         try {
-            JSONObject remote   = DsFileApiClient.downloadUserPositionsSync();
-            JSONObject merged   = mergePositions(mergePositions(remote, localSnapshot), positionsCache);
-            positionsCache = merged;
-            boolean ok = DsFileApiClient.uploadUserPositionsSync(merged);
+            boolean ok = DsFileApiClient.uploadUserPositionsSync(snapshot);
             if (!ok) {
                 dirty.set(true);
                 Log.w(TAG, "flushToNasBlocking 업로드 실패 → dirty 유지");
             } else {
-                Log.d(TAG, "flushToNasBlocking 성공: " + merged.length() + " 항목");
+                Log.d(TAG, "flushToNasBlocking 성공: " + snapshot.length() + " 항목");
             }
         } catch (Exception e) {
             dirty.set(true);
@@ -318,8 +337,8 @@ public class NasSyncManager {
     /**
      * 위치 로드. Room DB(빠름) 먼저 콜백 → NAS 캐시가 더 최신이면 두 번째 콜백.
      *
-     * 캐시가 비어있고 SID가 있으면 (앱 시작 후 로그인된 경우) NAS 재다운로드 후 비교.
-     * → B 단말 신규 설치 시: 생성자 시점엔 SID 없어 빈 캐시, 이후 로그인→영상 열기에서 보정.
+     * Cache-first: positionsCache를 소스 오브 트루스로 간주. 비어있으면 Room DB만 사용.
+     * startup fetch가 실패한 경우 30초 간격 백그라운드 재시도가 cache를 채우면 다음 재생부터 반영.
      *
      * @param syncKey  NAS 캐시 키 ("{폴더}/{파일명}")
      * @param roomDbKey Room DB 키 (canonical URL / content:// URI)
@@ -332,25 +351,9 @@ public class NasSyncManager {
             mainHandler.post(() -> cb.onPosition(dbPos));
 
             if (syncKey == null || syncKey.isEmpty()) return;
+            if (positionsCache == null || positionsCache.length() == 0) return;
 
-            // 2. 캐시가 비어있고 SID 확보됐으면 동기 로드 후 비교
-            // (초기 비동기 로드가 아직 완료 안 됐을 수 있으므로 동기로 직접 가져옴)
-            if ((positionsCache == null || positionsCache.length() == 0)
-                    && DsFileApiClient.getCachedSid() != null) {
-                Log.d(TAG, "loadPosition: 캐시 비어있음 → 동기 로드 시도");
-                try {
-                    JSONObject fetched = DsFileApiClient.downloadUserPositionsSync();
-                    if (positionsCache == null || positionsCache.length() == 0) {
-                        positionsCache = fetched;
-                    }
-                    Log.d(TAG, "loadPosition 동기 로드 완료: " + positionsCache.length() + " 항목");
-                } catch (Exception e) {
-                    Log.d(TAG, "loadPosition 동기 로드 실패: " + e.getMessage());
-                    return; // 실패 시 Room DB 결과만 사용
-                }
-            }
-
-            // 3. NAS 캐시 비교
+            // 2. NAS 캐시 비교
             compareAndCallbackNas(syncKey, roomDbKey, dbPos, cb);
         });
     }

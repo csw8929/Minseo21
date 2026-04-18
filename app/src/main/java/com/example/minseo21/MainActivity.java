@@ -1421,6 +1421,8 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         if (rotationLocked) {
             setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LOCKED);
         }
+        // 포그라운드 복귀 시 NAS positions 캐시를 TTL 기반으로 refresh
+        if (nasSyncManager != null) nasSyncManager.refreshIfStale();
     }
 
     @Override
