@@ -380,8 +380,8 @@ public class FileListActivity extends AppCompatActivity {
                 // 싱글턴 캐시 주입 — MainActivity 가 같은 JSON 재사용해 중복 다운로드 제거 (ISSUE-002)
                 NasSyncManager.getInstance(FileListActivity.this).seedCache(positions);
 
-                // ResumeSnapshot NAS 캡처 — resume 분기와 독립. 5초 타임아웃 후에도 동작.
-                captureNasSnapshotIfNull(positions);
+                // ResumeSnapshot REMOTE 캡처 — resume 분기와 독립. 5초 타임아웃 후에도 동작.
+                captureNasSnapshot(positions);
 
                 NasSyncManager.NasResumeEntry nasEntry =
                         NasSyncManager.findMostRecentEntry(positions);
@@ -782,6 +782,13 @@ public class FileListActivity extends AppCompatActivity {
         // NAS 콜백 늦게 도착 시 자동 갱신 훅
         ResumeSnapshot.onUpdate = this::loadFavorites;
         loadFavorites();
+
+        // REMOTE 슬롯은 탭 진입마다 NAS에서 강제 재 fetch → 최신 항목 반영
+        NasSyncManager nas = NasSyncManager.getInstance(this);
+        nas.forceRefresh(() -> {
+            JSONObject snapshot = nas.getPositionsSnapshot();
+            if (snapshot != null) captureNasSnapshot(snapshot);
+        });
     }
 
     private void loadFavorites() {
@@ -791,8 +798,8 @@ public class FileListActivity extends AppCompatActivity {
             List<Favorite> combined = new ArrayList<>();
             Favorite snapLocal = ResumeSnapshot.local;
             Favorite snapNas   = ResumeSnapshot.nas;
-            if (snapLocal != null) combined.add(snapLocal);  // [LOCAL] 빨간 별표
-            if (snapNas   != null) combined.add(snapNas);    // [NAS]   빨간 별표 (중복 허용)
+            if (snapLocal != null) combined.add(snapLocal);  // [LAST]   빨간 별표
+            if (snapNas   != null) combined.add(snapNas);    // [REMOTE] 빨간 별표 (중복 허용)
             combined.addAll(favs);
 
             runOnUiThread(() -> {
@@ -803,72 +810,43 @@ public class FileListActivity extends AppCompatActivity {
     }
 
     /**
-     * NAS positions.json 결과로 "빨간 별표 NAS" 스냅샷을 한 번 캡처.
+     * NAS positions.json 결과로 REMOTE 슬롯 스냅샷을 갱신.
      *
-     * 전략: positions 항목을 updatedAt DESC 순회. 각 항목에 대해 아래 우선순위로 합성 시도.
-     * 첫 성공이 채택되고, 나머지는 스킵.
-     *   1) deviceId == this + Room DB에 이력 존재 → Room DB 기반 (uri/bucketId 복구)
-     *   2) 이 단말 MediaStore에 같은 파일명 존재 → 로컬 Favorite (startup cross-device dialog 로직과 일치)
-     *   3) nasPath 존재 → NAS 스트리밍 Favorite
-     *   4) 어디에도 해당 안 됨 (다른 단말의 로컬 파일인데 이 단말에 없음) → 다음 후보
+     * REMOTE 의미: positions.json에서 updatedAt이 가장 큰 NAS-backed 항목 1개.
+     * 단말 일치 / 로컬 재생 가능 여부 무관 — LAST 슬롯이 이 단말의 로컬 최신을 이미 커버한다.
      *
-     * Startup resume가 제안한 항목과 동일한 결과를 보장한다.
+     * nasPath가 있는 항목이 하나도 없으면 REMOTE 슬롯을 비운다 (stale 유지 방지).
+     * 매 호출마다 덮어쓴다.
      */
-    private void captureNasSnapshotIfNull(JSONObject positions) {
-        if (ResumeSnapshot.nas != null) return;
+    private void captureNasSnapshot(JSONObject positions) {
         java.util.List<NasSyncManager.NasResumeEntry> candidates =
                 NasSyncManager.listEntriesDescending(positions);
-        if (candidates.isEmpty()) return;
-        final String thisDeviceId = android.provider.Settings.Secure.getString(
-                getContentResolver(), android.provider.Settings.Secure.ANDROID_ID);
-        // DB / MediaStore 조회가 포함되므로 dbExecutor에서 순회
-        // onDestroy → dbExecutor.shutdown() 이후 NAS 콜백이 늦게 도착하면
-        // execute()가 RejectedExecutionException을 던지므로 방어.
+        if (candidates.isEmpty()) {
+            runOnUiThread(() -> setNasSnapshot(null));
+            return;
+        }
+        // dbExecutor가 아직 살아있으면 사용 — 과거 경로 호환 위해 유지.
+        // 실제로 Room/MediaStore 조회는 제거됐지만 onDestroy → shutdown 경계는 그대로 존중.
         if (dbExecutor.isShutdown()) return;
         try {
             dbExecutor.execute(() -> {
+                Favorite picked = null;
                 for (NasSyncManager.NasResumeEntry entry : candidates) {
-                    Favorite f = tryCaptureOne(entry, thisDeviceId);
-                    if (f != null) {
-                        runOnUiThread(() -> setNasSnapshot(f));
-                        return;
-                    }
+                    Favorite f = tryCaptureOne(entry);
+                    if (f != null) { picked = f; break; }
                 }
+                final Favorite result = picked;
+                runOnUiThread(() -> setNasSnapshot(result));
             });
         } catch (java.util.concurrent.RejectedExecutionException ignored) {
-            // Activity가 이미 destroy된 경우 — 이 세션의 NAS 스냅샷은 캡처 안 함
+            // Activity가 이미 destroy된 경우 — 이 세션의 스냅샷은 건드리지 않음
         }
     }
 
-    /** 한 항목을 이 단말에서 재생 가능한 Favorite으로 합성 시도. 불가능하면 null. */
-    private Favorite tryCaptureOne(NasSyncManager.NasResumeEntry entry, String thisDeviceId) {
-        boolean sameDevice = thisDeviceId != null && thisDeviceId.equals(entry.deviceId);
-
-        // 1) 이 단말의 이력 — Room DB에서 full 정보 (uri/bucketId/트랙 설정)
-        if (sameDevice) {
-            PlaybackPosition pp = PlaybackDatabase.getInstance(this)
-                    .playbackDao().getLastPositionByName(entry.fileName());
-            if (pp != null && pp.uri != null) {
-                boolean isNas = DsFileApiClient.isNasUrl(pp.uri) || pp.uri.startsWith("http");
-                return recentFrom(pp, isNas);
-            }
-            // Room DB에 없으면 (재설치 등) 아래 로컬/NAS 합성으로 폴백
-        }
-
-        // 2) 이 단말의 MediaStore에 같은 파일명 존재 → 로컬 Favorite
-        //    (startup cross-device dialog가 이 경로로 로컬 재생을 제안하는 것과 동일 기준)
-        Uri localUri = lookupLocalUriByName(entry.fileName());
-        if (localUri != null) {
-            return synthLocalFavorite(entry, localUri);
-        }
-
-        // 3) NAS 파일 — 단말 무관 스트리밍
-        if (entry.nasPath != null) {
-            return synthNasFavorite(entry);
-        }
-
-        // 4) 다른 단말의 로컬 파일이고 이 단말에 없음 → skip
-        return null;
+    /** NAS-backed 항목이면 스트리밍 Favorite으로, 아니면 null. */
+    private Favorite tryCaptureOne(NasSyncManager.NasResumeEntry entry) {
+        if (entry.nasPath == null) return null;
+        return synthNasFavorite(entry);
     }
 
     /** MediaStore에서 DISPLAY_NAME 일치하는 첫 비디오 URI. */

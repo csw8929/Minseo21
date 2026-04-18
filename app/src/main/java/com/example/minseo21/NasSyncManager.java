@@ -231,9 +231,29 @@ public class NasSyncManager {
     public void refreshIfStale() {
         long now = System.currentTimeMillis();
         if (now - lastFetchAt < RESUME_REFRESH_TTL_MS) return;
-        if (DsFileApiClient.getCachedSid() == null) return;
-        if (loading.get()) return;
-        if (!loading.compareAndSet(false, true)) return;
+        doRefresh(null);
+    }
+
+    /**
+     * TTL 무시하고 positions.json 강제 재로드. 사용자 의도가 명확한 포인트(예: 즐겨찾기 탭 진입)
+     * 에서만 호출. 세션 dirty 쓰기는 mergePositions로 보존된다.
+     *
+     * @param onDone 성공/실패 무관 완료 콜백 (메인 스레드). null 허용.
+     */
+    public void forceRefresh(Runnable onDone) {
+        doRefresh(onDone);
+    }
+
+    private void doRefresh(Runnable onDone) {
+        if (DsFileApiClient.getCachedSid() == null) {
+            if (onDone != null) mainHandler.post(onDone);
+            return;
+        }
+        if (!loading.compareAndSet(false, true)) {
+            // 이미 로딩 중이면 onDone은 100ms 뒤 재시도 (loadAllPositionsFromNas와 동일 패턴)
+            if (onDone != null) mainHandler.postDelayed(() -> doRefresh(onDone), 100);
+            return;
+        }
 
         DsFileApiClient.downloadUserPositions(new DsFileApiClient.Callback<JSONObject>() {
             @Override public void onResult(JSONObject remote) {
@@ -242,12 +262,19 @@ public class NasSyncManager {
                 lastFetchAt = System.currentTimeMillis();
                 loading.set(false);
                 Log.d(TAG, "NAS 캐시 refresh 완료: " + positionsCache.length() + " 항목");
+                if (onDone != null) mainHandler.post(onDone);
             }
             @Override public void onError(String msg) {
                 loading.set(false);
                 Log.d(TAG, "NAS 캐시 refresh 실패 (기존 캐시 유지): " + msg);
+                if (onDone != null) mainHandler.post(onDone);
             }
         });
+    }
+
+    /** 현재 positions 캐시 스냅샷. null = 아직 로드 안 됨. */
+    public JSONObject getPositionsSnapshot() {
+        return positionsCache;
     }
 
     /**
