@@ -150,3 +150,49 @@ https://gomji17.synology.me:5001
 - **마이그레이션**: 기존 사용자도 같은 stale prefs 가능 → 앱 첫 실행 시
   `NasCredentialStore.getBaseUrl()` 이 quickconnect.to 포함이면 자동으로
   `DsFileConfig.BASE_URL` fallback 로 덮어쓰는 것도 고려.
+
+## ISSUE-002 — 첫 재생 시 이어보기 시드 미반영 (NAS 캐시 레이스)
+
+**발견**: 2026-04-18
+**해결**: 2026-04-18
+**상태**: 해결됨 (B안 — Application 싱글턴)
+
+### 증상
+즐겨찾기 화면에는 12분 위치가 표시되지만, **해당 파일을 처음 재생할 때**
+`pos=0ms` 부터 시작. 같은 파일을 다시 재생하면 이어보기가 정상 동작.
+
+### 원인 — MainActivity 의 NasSyncManager 생성 타이밍
+`MainActivity.onCreate()` 가 **새** `NasSyncManager` 를 생성
+(MainActivity.java:162). 생성자에서 `loadAllPositionsFromNas(null)` 를
+백그라운드로 호출하지만, `beginPlayback()` 이 즉시 진행되어
+`loadSavedPosition()` 이 캐시가 채워지기 전에 실행됨.
+
+logcat (17:26:38 1회차 재생):
+```
+17:26:38.074  [버퍼링 시작 #1] pos=0ms              ← 재생 시작
+17:26:38.225  HTTP 200 ← csw8929_positions.json    ← NAS 캐시 download 완료
+17:26:38.226  downloadUserPositions: 35 항목       ← 150ms 늦음
+```
+
+`NasSyncManager.loadPosition()` 은 `positionsCache.length() == 0` 이면
+NAS 비교를 건너뛰고 Room DB 만 사용 (NasSyncManager.java:354). 데이터 삭제
+직후라 Room DB 도 비어있어 **null 위치 → 0ms 재생**.
+
+두 번째 재생은 캐시가 이미 채워져 있어 772288ms (12:52) 로 정상 시크.
+
+### 구조적 문제
+- `NasSyncManager` 가 Activity 스코프 (`FileListActivity` / `MainActivity` 각자 보유)
+- 두 액티비티 모두 생성자에서 중복 download 호출 (logcat 17:26:35 + 17:26:38)
+- 캐시가 액티비티 전환 경계에서 공유되지 않음
+
+### 해결 (B안 — Application 싱글턴)
+- `NasSyncManager.getInstance(Context)` 싱글턴 + 내부 전용 `ExecutorService`
+  (액티비티 생명주기와 독립).
+- `FileListActivity.fetchNasAndShowResume()` 의 download 결과를
+  `seedCache(positions)` 로 싱글턴에 주입 → `MainActivity` 는 재다운로드 없이
+  캐시 즉시 사용.
+- `NasSyncManager.loadPosition()` 에 lazy-load 백업 경로 추가: 캐시가 null 이고
+  SID 가 있으면 `loadAllPositionsFromNas` 후 NAS 비교 재시도. 다이렉트 intent
+  로 `MainActivity` 가 단독 실행될 때도 동작.
+- 생성자 자동 download 제거: SID 없는 시점에 호출되면 빈 캐시가 고정되는 문제
+  방지 (seedCache 또는 lazy-load 로 대체).

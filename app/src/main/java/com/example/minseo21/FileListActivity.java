@@ -377,6 +377,9 @@ public class FileListActivity extends AppCompatActivity {
     private void fetchNasAndShowResume(PlaybackPosition localLast, String sid) {
         DsFileApiClient.downloadUserPositions(new DsFileApiClient.Callback<JSONObject>() {
             @Override public void onResult(JSONObject positions) {
+                // 싱글턴 캐시 주입 — MainActivity 가 같은 JSON 재사용해 중복 다운로드 제거 (ISSUE-002)
+                NasSyncManager.getInstance(FileListActivity.this).seedCache(positions);
+
                 // ResumeSnapshot NAS 캡처 — resume 분기와 독립. 5초 타임아웃 후에도 동작.
                 captureNasSnapshotIfNull(positions);
 

@@ -10,6 +10,7 @@ import org.json.JSONObject;
 
 import java.util.Iterator;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -143,11 +144,42 @@ public class NasSyncManager {
         return out;
     }
 
-    public NasSyncManager(Context context, ExecutorService dbExecutor) {
-        this.context    = context.getApplicationContext();
-        this.dbExecutor = dbExecutor;
-        // 앱 시작 시 NAS 캐시 백그라운드 로드
-        loadAllPositionsFromNas(null);
+    private static volatile NasSyncManager INSTANCE;
+
+    /**
+     * Application-scope 싱글턴. FileListActivity / MainActivity 가 공유.
+     * 캐시가 액티비티 경계에서 보존되어 MainActivity 첫 재생 시 레이스 방지 (ISSUE-002).
+     */
+    public static NasSyncManager getInstance(Context ctx) {
+        NasSyncManager local = INSTANCE;
+        if (local == null) {
+            synchronized (NasSyncManager.class) {
+                local = INSTANCE;
+                if (local == null) {
+                    INSTANCE = local = new NasSyncManager(ctx.getApplicationContext());
+                }
+            }
+        }
+        return local;
+    }
+
+    private NasSyncManager(Context appContext) {
+        this.context    = appContext;
+        // 싱글턴 전용 내부 executor — 액티비티 생명주기와 독립.
+        this.dbExecutor = Executors.newSingleThreadExecutor();
+        // 자동 다운로드 안 함: SID 없는 시점에 호출되면 빈 캐시가 고정되어 이후 compare 스킵됨.
+        // 로그인 직후 seedCache() 또는 필요 시 loadPosition() 이 lazy-load 를 트리거.
+    }
+
+    /**
+     * FileListActivity 가 이미 다운로드한 positions JSON 을 싱글턴 캐시에 주입.
+     * MainActivity 의 중복 네트워크 호출을 제거하고 첫 재생 레이스도 해결.
+     */
+    public void seedCache(JSONObject positions) {
+        if (positions == null) return;
+        positionsCache = positions;
+        lastFetchAt = System.currentTimeMillis();
+        Log.d(TAG, "NAS 캐시 seed: " + positions.length() + " 항목");
     }
 
     /**
@@ -351,9 +383,16 @@ public class NasSyncManager {
             mainHandler.post(() -> cb.onPosition(dbPos));
 
             if (syncKey == null || syncKey.isEmpty()) return;
-            if (positionsCache == null || positionsCache.length() == 0) return;
 
-            // 2. NAS 캐시 비교
+            // 2. 캐시 미준비 시 lazy-load 후 NAS 비교 (ISSUE-002: 첫 재생 레이스 방지)
+            if (positionsCache == null) {
+                if (DsFileApiClient.getCachedSid() == null) return; // SID 없으면 로컬만
+                loadAllPositionsFromNas(() -> compareAndCallbackNas(syncKey, roomDbKey, dbPos, cb));
+                return;
+            }
+            if (positionsCache.length() == 0) return;
+
+            // 3. 캐시 준비됨 → 즉시 NAS 비교
             compareAndCallbackNas(syncKey, roomDbKey, dbPos, cb);
         });
     }
