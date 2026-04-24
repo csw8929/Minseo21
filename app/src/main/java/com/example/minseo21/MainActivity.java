@@ -680,7 +680,11 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
                 handler.removeCallbacks(savePositionTask);
                 handler.postDelayed(savePositionTask, SAVE_INTERVAL_MS);
                 // XR SBS 모드: 재생 시작 → 시네마 룸 진입 (패스스루 OFF)
-                if (xrSbsMode) xrManager.enterCinemaRoom();
+                if (xrSbsMode) {
+                    xrManager.enterCinemaRoom();
+                    // 시네마 룸 진입 후 컨트롤 계속 표시 (XR에서 자동숨김 비활성)
+                    showControls();
+                }
                 break;
             case MediaPlayer.Event.Paused:
             case MediaPlayer.Event.Stopped:
@@ -930,7 +934,12 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         controlsOverlay.setVisibility(View.VISIBLE);
         btnBack.setVisibility(View.VISIBLE);
         controlsVisible = true;
-        resetHideTimer();
+        // XR SBS 모드에서는 헤드셋으로 다시 탭하기 어려우므로 자동 숨김 비활성화
+        if (!xrSbsMode) {
+            resetHideTimer();
+        } else {
+            handler.removeCallbacks(hideControls);
+        }
     }
 
     private void scheduleHide() {

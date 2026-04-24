@@ -1,6 +1,8 @@
 package com.example.minseo21
 
 import android.app.Activity
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.xr.runtime.Session
 import androidx.xr.runtime.SessionCreateSuccess
@@ -26,9 +28,10 @@ class XrPlayerManager(private val activity: Activity) {
 
     companion object {
         private const val TAG = "SACH_XR"
-        // 화면 전면 2m 거리, 1.9m 너비 (16:9 비율 기준)
+        // 화면 전면 2m 거리, 2.4m 너비 (16:9 비율 기준 — 크게 만들어 놓치기 어렵게)
         private val SCREEN_POSE  = Pose(Vector3(0f, 0f, -2.0f))
-        private val SCREEN_SHAPE = SurfaceEntity.Shape.Quad(FloatSize2d(1.9f, 1.07f))
+        private val SCREEN_SHAPE = SurfaceEntity.Shape.Quad(FloatSize2d(2.4f, 1.35f))
+        private const val RECREATE_DELAY_MS = 300L
     }
 
     // Galaxy XR(SM-I610)은 android.hardware.type.xr 대신
@@ -47,6 +50,8 @@ class XrPlayerManager(private val activity: Activity) {
     private var session: Session? = null
     private var surfaceEntity: SurfaceEntity? = null
     private var inCinemaRoom = false
+    private var lastMediaPlayer: MediaPlayer? = null
+    private val handler = Handler(Looper.getMainLooper())
 
     // ── 초기화 ──────────────────────────────────────────────────────────────
 
@@ -101,8 +106,15 @@ class XrPlayerManager(private val activity: Activity) {
      *         false = 실패 또는 비-XR → 호출자가 기존 attachViews(videoLayout) 를 그대로 사용.
      */
     fun setupStereoSurface(mediaPlayer: MediaPlayer): Boolean {
+        lastMediaPlayer = mediaPlayer
         val s = session ?: return false
         return try {
+            // 기존 VLC 출력 분리 후 SurfaceEntity 재생성
+            val vout = mediaPlayer.vlcVout
+            if (vout.areViewsAttached()) {
+                vout.detachViews()
+                Log.i(TAG, "StereoSurface — 기존 VLC 출력 분리")
+            }
             surfaceEntity?.dispose()
             surfaceEntity = SurfaceEntity.create(
                 s,
@@ -113,10 +125,9 @@ class XrPlayerManager(private val activity: Activity) {
             val xrSurface = surfaceEntity?.getSurface()
                 ?: run { Log.w(TAG, "SurfaceEntity.getSurface() null"); return false }
 
-            val vout = mediaPlayer.vlcVout
             vout.setVideoSurface(xrSurface, null)
             vout.attachViews()
-            Log.i(TAG, "XR StereoSurface 연결 완료")
+            Log.i(TAG, "XR StereoSurface 연결 완료 — 크기=${SCREEN_SHAPE} 거리=2m")
             true
         } catch (e: Exception) {
             Log.e(TAG, "XR StereoSurface 연결 실패: $e")
@@ -137,7 +148,7 @@ class XrPlayerManager(private val activity: Activity) {
         val s = session ?: return
         try {
             s.scene.requestFullSpaceMode()
-            Log.i(TAG, "시네마 룸 진입 — requestFullSpaceMode()")
+            Log.i(TAG, "시네마 룸 진입 — requestFullSpaceMode() 호출")
         } catch (e: Exception) {
             Log.w(TAG, "requestFullSpaceMode 실패: $e")
         }
@@ -147,6 +158,16 @@ class XrPlayerManager(private val activity: Activity) {
             Log.i(TAG, "시네마 룸 진입 — 패스스루 OFF")
         }
         inCinemaRoom = true
+
+        // FULL_SPACE 전환 안정 대기 후 SurfaceEntity 재생성
+        // HOME_SPACE에서 생성된 SurfaceEntity는 FULL_SPACE에서 무효할 수 있음
+        val mp = lastMediaPlayer ?: return
+        handler.postDelayed({
+            if (!inCinemaRoom) return@postDelayed
+            Log.i(TAG, "시네마 룸 — ${RECREATE_DELAY_MS}ms 후 SurfaceEntity 재생성 시작")
+            val ok = setupStereoSurface(mp)
+            Log.i(TAG, "시네마 룸 — SurfaceEntity 재생성 결과=$ok")
+        }, RECREATE_DELAY_MS)
     }
 
     /**
@@ -155,6 +176,7 @@ class XrPlayerManager(private val activity: Activity) {
      */
     fun exitCinemaRoom() {
         if (!inCinemaRoom) return
+        handler.removeCallbacksAndMessages(null)  // 예약된 SurfaceEntity 재생성 취소
         try {
             session?.scene?.requestHomeSpaceMode()
             Log.i(TAG, "시네마 룸 종료 — requestHomeSpaceMode()")
@@ -182,9 +204,11 @@ class XrPlayerManager(private val activity: Activity) {
 
     /** onDestroy 에서 호출. SurfaceEntity 해제. Session 은 LifecycleOwner 가 관리. */
     fun release() {
+        handler.removeCallbacksAndMessages(null)
         exitCinemaRoom()
         try { surfaceEntity?.dispose() } catch (_: Exception) {}
         surfaceEntity = null
+        lastMediaPlayer = null
         session = null
     }
 
