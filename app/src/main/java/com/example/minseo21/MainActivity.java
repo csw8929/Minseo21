@@ -105,6 +105,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     private ImageButton btnFastForward;
     private ImageButton btnPrev;
     private ImageButton btnNext;
+    private ImageButton btnBack;
     private SeekBar seekBar;
     private TextView tvCurrentTime;
     private TextView tvTotalTime;
@@ -122,6 +123,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         topBar.setVisibility(View.GONE);
         centerControls.setVisibility(View.GONE);
         controlsOverlay.setVisibility(View.GONE);
+        btnBack.setVisibility(View.GONE);
         controlsVisible = false;
         // 회전 잠금 상태는 컨트롤 숨김과 무관하게 유지
     };
@@ -198,6 +200,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         btnFastForward   = findViewById(R.id.btnFastForward);
         btnPrev          = findViewById(R.id.btnPrev);
         btnNext          = findViewById(R.id.btnNext);
+        btnBack          = findViewById(R.id.btnBack);
         seekBar          = findViewById(R.id.seekBar);
         tvCurrentTime    = findViewById(R.id.tvCurrentTime);
         tvTotalTime      = findViewById(R.id.tvTotalTime);
@@ -294,8 +297,17 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         xrSbsMode = false;
         String sbsCheckName = source.syncKey != null ? source.syncKey
                             : (currentTitle != null ? currentTitle : "");
-        if (xrManager.isXrDevice() && xrManager.isSbsByName(sbsCheckName)) {
-            xrSbsMode = xrManager.setupStereoSurface(mediaPlayer);
+        Log.i("SACH_XR", "[initPlayer] XR기기=" + xrManager.isXrDevice() + " 파일명체크='" + sbsCheckName + "'");
+        if (xrManager.isXrDevice()) {
+            boolean sbsByName = xrManager.isSbsByName(sbsCheckName);
+            Log.i("SACH_XR", "[initPlayer] isSbsByName='" + sbsCheckName + "' → " + sbsByName);
+            if (sbsByName) {
+                Log.i("SACH_XR", "[initPlayer] 파일명 패턴 일치 → setupStereoSurface 시도");
+                xrSbsMode = xrManager.setupStereoSurface(mediaPlayer);
+                Log.i("SACH_XR", "[initPlayer] setupStereoSurface 결과=" + xrSbsMode);
+            } else {
+                Log.i("SACH_XR", "[initPlayer] 파일명 패턴 불일치 → 일반 모드 (비율 체크는 logTracks 이후)");
+            }
         }
         if (!xrSbsMode) {
             // 일반 모드 (비-XR 단말 또는 SBS 아닌 파일)
@@ -558,8 +570,24 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
                         IMedia.VideoTrack vt = (IMedia.VideoTrack) t;
                         videoW = vt.width;
                         videoH = vt.height;
+                        float ratio = videoH > 0 ? (float) videoW / videoH : 0f;
                         Log.i(TAG, "[VLC] Video Track: " + videoW + "x" + videoH);
                         Log.i(TAG, "[VLC] HW ACCEL: MediaCodec (qti/google) requested.");
+                        Log.i("SACH_XR", "[logTracks] 해상도=" + videoW + "x" + videoH
+                                + " ratio=" + String.format("%.2f", ratio)
+                                + " xrSbsMode(현재)=" + xrSbsMode);
+                        // 파일명 감지 실패 시 비율로 SBS 폴백 감지
+                        if (!xrSbsMode && xrManager.isXrDevice()) {
+                            boolean sbsByRatio = xrManager.isSbsByRatio(videoW, videoH);
+                            Log.i("SACH_XR", "[logTracks] isSbsByRatio(" + videoW + "," + videoH
+                                    + ") ratio=" + String.format("%.2f", ratio) + " → " + sbsByRatio);
+                            if (sbsByRatio) {
+                                Log.i("SACH_XR", "[logTracks] 비율 기반 SBS 감지 → setupStereoSurface 시도");
+                                boolean ok = xrManager.setupStereoSurface(mediaPlayer);
+                                Log.i("SACH_XR", "[logTracks] setupStereoSurface 결과=" + ok);
+                                if (ok) xrSbsMode = true;
+                            }
+                        }
                         break;
                     }
                 }
@@ -782,6 +810,8 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         centerControls.setOnClickListener(v -> resetHideTimer());
         controlsOverlay.setOnClickListener(v -> resetHideTimer());
 
+        btnBack.setOnClickListener(v -> finish());
+
         btnPlayPause.setOnClickListener(v -> {
             if (mediaPlayer == null) return;
             if (mediaPlayer.isPlaying()) mediaPlayer.pause();
@@ -876,6 +906,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             topBar.setVisibility(View.GONE);
             centerControls.setVisibility(View.GONE);
             controlsOverlay.setVisibility(View.GONE);
+            btnBack.setVisibility(View.GONE);
             controlsVisible = false;
         } else {
             showControls();
@@ -886,6 +917,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         topBar.setVisibility(View.VISIBLE);
         centerControls.setVisibility(View.VISIBLE);
         controlsOverlay.setVisibility(View.VISIBLE);
+        btnBack.setVisibility(View.VISIBLE);
         controlsVisible = true;
         resetHideTimer();
     }
