@@ -276,18 +276,17 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         handler.removeCallbacks(nasFlushTask);
         handler.postDelayed(nasFlushTask, NAS_FLUSH_INTERVAL_MS);
 
-        // XR SBS 사전 감지: LibVLC 옵션 결정을 위해 파일명만 먼저 확인
+        // 파일명 기반 SBS 사전 감지 (XR 기기 확인용)
         String sbsCheckName = source.syncKey != null ? source.syncKey
                             : (currentTitle != null ? currentTitle : "");
-        boolean xrSbsPreDetect = xrManager.isXrDevice() && xrManager.isSbsByName(sbsCheckName);
 
         ArrayList<String> options = new ArrayList<>();
-        if (xrSbsPreDetect) {
-            // XR SBS 모드: MediaCodec 직접 렌더링(DR)이 XR SurfaceEntity(GL 기반)와
-            // 호환되지 않아 검은 화면이 됨 → DR 비활성화, NDK 코덱 제외
+        if (xrManager.isXrDevice()) {
+            // XR 기기: DR(직접 렌더링) 비활성. DR이 켜지면 GL 기반 XR SurfaceEntity에
+            // 쓸 수 없어 SBS 검은 화면이 발생. 비율 감지 경로도 포함하여 항상 적용.
             options.add("--codec=mediacodec_jni,none");
             options.add("--no-mediacodec-dr");
-            Log.i("SACH_XR", "[initPlayer] XR SBS 모드 → --no-mediacodec-dr 적용");
+            Log.i("SACH_XR", "[initPlayer] XR 기기 → --no-mediacodec-dr 항상 적용");
         } else {
             // HW 디코더: mediacodec_ndk(NDK) → mediacodec_jni(JNI) → 소프트웨어 순서로 시도
             options.add("--codec=mediacodec_ndk,mediacodec_jni,none");
@@ -1280,6 +1279,9 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     @Override
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
+        // uiMode 변경 추적: requestFullSpaceMode() 호출 시 Galaxy XR이 config 변경을 발생시키는지 확인
+        Log.i("SACH_XR", "[configChanged] uiMode=" + newConfig.uiMode
+                + " xrSbsMode=" + xrSbsMode + " inCinemaRoom=" + xrManager.isInCinemaRoom());
         if (currentScreenMode > 0) {
             videoLayout.setAlpha(0f);
             handler.postDelayed(() -> {

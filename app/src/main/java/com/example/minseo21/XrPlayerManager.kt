@@ -31,7 +31,23 @@ class XrPlayerManager(private val activity: Activity) {
         // 화면 전면 2m 거리, 2.4m 너비 (16:9 비율 기준 — 크게 만들어 놓치기 어렵게)
         private val SCREEN_POSE  = Pose(Vector3(0f, 0f, -2.0f))
         private val SCREEN_SHAPE = SurfaceEntity.Shape.Quad(FloatSize2d(2.4f, 1.35f))
+        // requestFullSpaceMode() 후 XR 컴포지터 전환 안정 대기 시간
         private const val RECREATE_DELAY_MS = 300L
+
+        // ── 순수 함수 (Android 의존 없음 — JUnit 직접 테스트 가능) ─────────────
+        internal fun sbsPatternMatch(name: String): Boolean {
+            val lower = name.lowercase()
+            return lower.contains("_sbs") ||
+                   lower.contains("_3d")  ||
+                   lower.contains(".sbs.") ||
+                   lower.contains("[sbs]") ||
+                   lower.contains("[3d]")
+        }
+
+        internal fun sbsRatioMatch(videoW: Int, videoH: Int): Boolean {
+            if (videoH <= 0) return false
+            return videoW.toFloat() / videoH >= 3.5f
+        }
     }
 
     // Galaxy XR(SM-I610)은 android.hardware.type.xr 대신
@@ -70,6 +86,8 @@ class XrPlayerManager(private val activity: Activity) {
         }
     }
 
+    fun isInCinemaRoom(): Boolean = inCinemaRoom
+
     // ── SBS 콘텐츠 판별 ──────────────────────────────────────────────────────
 
     /**
@@ -79,12 +97,7 @@ class XrPlayerManager(private val activity: Activity) {
      */
     fun isSbsByName(name: String): Boolean {
         if (!isXrDevice) return false
-        val lower = name.lowercase()
-        return lower.contains("_sbs") ||
-               lower.contains("_3d")  ||
-               lower.contains(".sbs.") ||
-               lower.contains("[sbs]") ||
-               lower.contains("[3d]")
+        return sbsPatternMatch(name)
     }
 
     /**
@@ -92,8 +105,8 @@ class XrPlayerManager(private val activity: Activity) {
      * 트랙 정보 로딩 후([logTracks] 이후) 보조 수단으로 사용.
      */
     fun isSbsByRatio(videoW: Int, videoH: Int): Boolean {
-        if (!isXrDevice || videoH <= 0) return false
-        return videoW.toFloat() / videoH >= 3.5f
+        if (!isXrDevice) return false
+        return sbsRatioMatch(videoW, videoH)
     }
 
     // ── libVLC → SurfaceEntity 연결 ──────────────────────────────────────────
