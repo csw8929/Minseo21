@@ -276,9 +276,22 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         handler.removeCallbacks(nasFlushTask);
         handler.postDelayed(nasFlushTask, NAS_FLUSH_INTERVAL_MS);
 
+        // XR SBS 사전 감지: LibVLC 옵션 결정을 위해 파일명만 먼저 확인
+        String sbsCheckName = source.syncKey != null ? source.syncKey
+                            : (currentTitle != null ? currentTitle : "");
+        boolean xrSbsPreDetect = xrManager.isXrDevice() && xrManager.isSbsByName(sbsCheckName);
+
         ArrayList<String> options = new ArrayList<>();
-        // HW 디코더: mediacodec_ndk(NDK) → mediacodec_jni(JNI) → 소프트웨어 순서로 시도
-        options.add("--codec=mediacodec_ndk,mediacodec_jni,none");
+        if (xrSbsPreDetect) {
+            // XR SBS 모드: MediaCodec 직접 렌더링(DR)이 XR SurfaceEntity(GL 기반)와
+            // 호환되지 않아 검은 화면이 됨 → DR 비활성화, NDK 코덱 제외
+            options.add("--codec=mediacodec_jni,none");
+            options.add("--no-mediacodec-dr");
+            Log.i("SACH_XR", "[initPlayer] XR SBS 모드 → --no-mediacodec-dr 적용");
+        } else {
+            // HW 디코더: mediacodec_ndk(NDK) → mediacodec_jni(JNI) → 소프트웨어 순서로 시도
+            options.add("--codec=mediacodec_ndk,mediacodec_jni,none");
+        }
         // 색심도: RV32 (32bit, 고색 재현). VLCVideoLayout(TextureView) → --vout=android-display 충돌
         options.add("--android-display-chroma=RV32");
         // -1(auto): 인터레이스 콘텐츠(구형 AVI) 자동 감지
@@ -295,8 +308,6 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
 
         // XR SBS 모드: 파일명(syncKey or title)으로 SBS 감지 → SurfaceEntity 연결 시도
         xrSbsMode = false;
-        String sbsCheckName = source.syncKey != null ? source.syncKey
-                            : (currentTitle != null ? currentTitle : "");
         Log.i("SACH_XR", "[initPlayer] XR기기=" + xrManager.isXrDevice() + " 파일명체크='" + sbsCheckName + "'");
         if (xrManager.isXrDevice()) {
             boolean sbsByName = xrManager.isSbsByName(sbsCheckName);
