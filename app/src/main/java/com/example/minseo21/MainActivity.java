@@ -54,6 +54,10 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     private boolean tracksLogged = false;
     private int videoW = 0, videoH = 0;
 
+    // XR 전용 — 비-XR 단말에서는 항상 null / false
+    private XrPlayerManager xrManager;
+    private boolean xrSbsMode = false;
+
     private boolean rotationLocked = false;
 
     private String currentUriKey = null;
@@ -160,6 +164,8 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         super.onCreate(savedInstanceState);
 
         nasSyncManager = NasSyncManager.getInstance(this);
+        xrManager = new XrPlayerManager(this);
+        xrManager.init();
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         WindowInsetsControllerCompat insetsCtrl =
@@ -283,7 +289,18 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
 
         libVLC = new LibVLC(this, options);
         mediaPlayer = new MediaPlayer(libVLC);
-        mediaPlayer.attachViews(videoLayout, null, false, true);
+
+        // XR SBS 모드: 파일명(syncKey or title)으로 SBS 감지 → SurfaceEntity 연결 시도
+        xrSbsMode = false;
+        String sbsCheckName = source.syncKey != null ? source.syncKey
+                            : (currentTitle != null ? currentTitle : "");
+        if (xrManager.isXrDevice() && xrManager.isSbsByName(sbsCheckName)) {
+            xrSbsMode = xrManager.setupStereoSurface(mediaPlayer);
+        }
+        if (!xrSbsMode) {
+            // 일반 모드 (비-XR 단말 또는 SBS 아닌 파일)
+            mediaPlayer.attachViews(videoLayout, null, false, true);
+        }
         mediaPlayer.getVLCVout().addCallback(this);
         mediaPlayer.setEventListener(event -> runOnUiThread(() -> handleVlcEvent(event)));
 
@@ -623,6 +640,8 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
                 }
                 handler.removeCallbacks(savePositionTask);
                 handler.postDelayed(savePositionTask, SAVE_INTERVAL_MS);
+                // XR SBS 모드: 재생 시작 → 시네마 룸 진입 (패스스루 OFF)
+                if (xrSbsMode) xrManager.enterCinemaRoom();
                 break;
             case MediaPlayer.Event.Paused:
             case MediaPlayer.Event.Stopped:
@@ -630,6 +649,8 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
                 btnPlayPause.setImageResource(R.drawable.ic_play);
                 handler.removeCallbacks(savePositionTask);
                 saveCurrentPosition();
+                // XR: 일시정지/정지 시 패스스루 복귀 (사용자가 현실을 볼 수 있게)
+                if (xrSbsMode) xrManager.exitCinemaRoom();
                 showControls();
                 break;
             case MediaPlayer.Event.EndReached:
@@ -1242,6 +1263,8 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     protected void onPause() {
         super.onPause();
         saveCurrentPosition();
+        // 헤드셋 탈착·앱 전환 시 패스스루 강제 복귀 (안전 필수)
+        xrManager.onPause();
         // onPause에서 flush 시작 → onStop에서 완료 대기 (앱 종료 전 NAS 저장 보장)
         nasFlushing = dbExecutor.submit(nasSyncManager::flushToNasBlocking);
         if (mediaPlayer != null) mediaPlayer.pause();
@@ -1272,6 +1295,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             mediaPlayer.release();
         }
         if (libVLC != null) libVLC.release();
+        xrManager.release();
         dbExecutor.shutdown();
     }
 

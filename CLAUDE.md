@@ -58,6 +58,7 @@ Minseo21 (app name: "삿치") is an Android video player app built with Java and
 
 The app UI and code comments are in Korean. Maintain Korean for user-facing strings and comments.
 
+
 ## Skill routing
 
 When the user's request matches an available skill, ALWAYS invoke it using the Skill
