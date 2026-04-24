@@ -127,24 +127,46 @@ class XrPlayerManager(private val activity: Activity) {
 
     // ── 시네마 룸 모드 ───────────────────────────────────────────────────────
 
-    /** 패스스루 OFF → 가상 방으로 전환. Playing 이벤트 수신 시 호출. */
+    /**
+     * Full Space 전환 + 패스스루 OFF → XR 시네마 모드 진입.
+     * Playing 이벤트 수신 시 호출.
+     * HOME_SPACE(2D 패널)에서는 SurfaceEntity가 렌더되지 않으므로
+     * requestFullSpaceMode() 로 openXrRendering=true 전환이 필수.
+     */
     fun enterCinemaRoom() {
-        val env = spatialEnvironment() ?: return
-        env.preferredPassthroughOpacity = 0.0f
+        val s = session ?: return
+        try {
+            s.scene.requestFullSpaceMode()
+            Log.i(TAG, "시네마 룸 진입 — requestFullSpaceMode()")
+        } catch (e: Exception) {
+            Log.w(TAG, "requestFullSpaceMode 실패: $e")
+        }
+        val env = spatialEnvironment()
+        if (env != null) {
+            env.preferredPassthroughOpacity = 0.0f
+            Log.i(TAG, "시네마 룸 진입 — 패스스루 OFF")
+        }
         inCinemaRoom = true
-        Log.i(TAG, "시네마 룸 진입 (패스스루 OFF)")
     }
 
     /**
-     * 패스스루 복귀 → 현실 세계로 돌아옴.
+     * Home Space 복귀 + 패스스루 복원.
      * onPause / 재생 중단 / 비-SBS 전환 시 반드시 호출.
      */
     fun exitCinemaRoom() {
         if (!inCinemaRoom) return
-        val env = spatialEnvironment() ?: run { inCinemaRoom = false; return }
-        env.preferredPassthroughOpacity = SpatialEnvironment.NO_PASSTHROUGH_OPACITY_PREFERENCE
+        try {
+            session?.scene?.requestHomeSpaceMode()
+            Log.i(TAG, "시네마 룸 종료 — requestHomeSpaceMode()")
+        } catch (e: Exception) {
+            Log.w(TAG, "requestHomeSpaceMode 실패: $e")
+        }
+        val env = spatialEnvironment()
+        if (env != null) {
+            env.preferredPassthroughOpacity = SpatialEnvironment.NO_PASSTHROUGH_OPACITY_PREFERENCE
+        }
         inCinemaRoom = false
-        Log.i(TAG, "시네마 룸 종료 (패스스루 복귀)")
+        Log.i(TAG, "시네마 룸 종료 — 패스스루 복귀")
     }
 
     // ── 생명주기 ─────────────────────────────────────────────────────────────
