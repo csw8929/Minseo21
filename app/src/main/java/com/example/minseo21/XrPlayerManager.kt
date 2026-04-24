@@ -31,8 +31,18 @@ class XrPlayerManager(private val activity: Activity) {
         private val SCREEN_SHAPE = SurfaceEntity.Shape.Quad(FloatSize2d(1.9f, 1.07f))
     }
 
-    val isXrDevice: Boolean = activity.packageManager
-        .hasSystemFeature("android.hardware.type.xr")
+    // Galaxy XR(SM-I610)은 android.hardware.type.xr 대신
+    // android.software.xr.api.spatial 또는 android.hardware.xr.input.controller 를 사용
+    val isXrDevice: Boolean = with(activity.packageManager) {
+        hasSystemFeature("android.hardware.type.xr") ||
+        hasSystemFeature("android.software.xr.api.spatial") ||
+        hasSystemFeature("android.hardware.xr.input.controller")
+    }.also { result ->
+        Log.i(TAG, "[isXrDevice] " + result +
+            " (type.xr=" + activity.packageManager.hasSystemFeature("android.hardware.type.xr") +
+            " xr.api.spatial=" + activity.packageManager.hasSystemFeature("android.software.xr.api.spatial") +
+            " xr.input.controller=" + activity.packageManager.hasSystemFeature("android.hardware.xr.input.controller") + ")")
+    }
 
     private var session: Session? = null
     private var surfaceEntity: SurfaceEntity? = null
