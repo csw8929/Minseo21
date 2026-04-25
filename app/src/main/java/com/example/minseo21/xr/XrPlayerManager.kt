@@ -1,4 +1,5 @@
-package com.example.minseo21
+@file:OptIn(androidx.xr.scenecore.ExperimentalSurfaceEntityPixelDimensionsApi::class)
+package com.example.minseo21.xr
 
 import android.app.Activity
 import android.os.Handler
@@ -9,10 +10,16 @@ import androidx.xr.runtime.SessionCreateSuccess
 import androidx.xr.runtime.math.FloatSize2d
 import androidx.xr.runtime.math.Pose
 import androidx.xr.runtime.math.Vector3
+import androidx.xr.scenecore.Entity
+import androidx.xr.scenecore.EntityMoveListener
+import androidx.xr.scenecore.MovableComponent
+import androidx.xr.scenecore.ResizableComponent
+import androidx.xr.scenecore.ResizeEvent
 import androidx.xr.scenecore.SpatialEnvironment
 import androidx.xr.scenecore.SurfaceEntity
 import androidx.xr.scenecore.scene
 import org.videolan.libvlc.MediaPlayer
+import kotlin.math.abs
 
 /**
  * Galaxy XR / Android XR 전용 플레이어 관리자.
@@ -28,11 +35,9 @@ class XrPlayerManager(private val activity: Activity) {
 
     companion object {
         private const val TAG = "SACH_XR"
-        // 화면 전면 2m 거리, 2.4m 너비 (16:9 비율 기준 — 크게 만들어 놓치기 어렵게)
-        private val SCREEN_POSE  = Pose(Vector3(0f, 0f, -2.0f))
-        private val SCREEN_SHAPE = SurfaceEntity.Shape.Quad(FloatSize2d(2.4f, 1.35f))
-        // requestFullSpaceMode() 후 XR 컴포지터 전환 안정 대기 시간
-        private const val RECREATE_DELAY_MS = 300L
+        // 영상 Quad 의 시작 위치/크기 — 사용자는 MovableComponent/ResizableComponent 로 변경 가능.
+        private val SCREEN_POSE  = Pose(Vector3(0f, 0.3f, -3.0f))
+        private val SCREEN_SHAPE = SurfaceEntity.Shape.Quad(FloatSize2d(3.2f, 1.8f))
 
         // ── 순수 함수 (Android 의존 없음 — JUnit 직접 테스트 가능) ─────────────
         internal fun sbsPatternMatch(name: String): Boolean {
@@ -66,8 +71,16 @@ class XrPlayerManager(private val activity: Activity) {
     private var session: Session? = null
     private var surfaceEntity: SurfaceEntity? = null
     private var inCinemaRoom = false
-    private var lastMediaPlayer: MediaPlayer? = null
     private val handler = Handler(Looper.getMainLooper())
+
+    /**
+     * Panel 과 영상 Quad 의 겹침 상태가 변할 때만 호출되는 콜백.
+     * `true` = 겹침(컨트롤이 영상 가림 → 자동숨김 필요),
+     * `false` = panel 이 영상 바깥(가리지 않음 → 자동숨김 불필요).
+     * 메인 스레드에서 호출됨 (XR Move 콜백이 메인 thread).
+     */
+    var onPanelOverlapChanged: ((Boolean) -> Unit)? = null
+    private var lastOverlap: Boolean? = null
 
     // ── 초기화 ──────────────────────────────────────────────────────────────
 
@@ -119,15 +132,10 @@ class XrPlayerManager(private val activity: Activity) {
      *         false = 실패 또는 비-XR → 호출자가 기존 attachViews(videoLayout) 를 그대로 사용.
      */
     fun setupStereoSurface(mediaPlayer: MediaPlayer): Boolean {
-        lastMediaPlayer = mediaPlayer
         val s = session ?: return false
         return try {
-            // 기존 VLC 출력 분리 후 SurfaceEntity 재생성
             val vout = mediaPlayer.vlcVout
-            if (vout.areViewsAttached()) {
-                vout.detachViews()
-                Log.i(TAG, "StereoSurface — 기존 VLC 출력 분리")
-            }
+            if (vout.areViewsAttached()) vout.detachViews()
             surfaceEntity?.dispose()
             surfaceEntity = SurfaceEntity.create(
                 s,
@@ -135,12 +143,29 @@ class XrPlayerManager(private val activity: Activity) {
                 SCREEN_SHAPE,
                 SurfaceEntity.StereoMode.SIDE_BY_SIDE,
             )
+            // MediaBlendingMode 를 OPAQUE 로 명시 — default(TRANSPARENT)면 비디오 투명 렌더됨.
+            try {
+                surfaceEntity?.mediaBlendingMode = SurfaceEntity.MediaBlendingMode.OPAQUE
+            } catch (e: Exception) {
+                Log.w(TAG, "mediaBlendingMode 설정 실패: $e")
+            }
+            // Surface 의 픽셀 크기를 libVLC 비디오 크기와 맞춤. 누락 시 frame mismatch 로 검은 화면 발생.
+            try {
+                @Suppress("OPT_IN_USAGE")
+                surfaceEntity?.setSurfacePixelDimensions(
+                    androidx.xr.runtime.math.IntSize2d(1920, 1080)
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "setSurfacePixelDimensions 실패: $e")
+            }
             val xrSurface = surfaceEntity?.getSurface()
                 ?: run { Log.w(TAG, "SurfaceEntity.getSurface() null"); return false }
 
             vout.setVideoSurface(xrSurface, null)
             vout.attachViews()
-            Log.i(TAG, "XR StereoSurface 연결 완료 — 크기=${SCREEN_SHAPE} 거리=2m")
+            Log.i(TAG, "XR StereoSurface 연결 완료")
+
+            attachInteraction(s)
             true
         } catch (e: Exception) {
             Log.e(TAG, "XR StereoSurface 연결 실패: $e")
@@ -149,38 +174,142 @@ class XrPlayerManager(private val activity: Activity) {
         }
     }
 
+    // ── 사용자 인터랙션 (Movable / Resizable) ──────────────────────────────
+
+    /**
+     * SurfaceEntity(영상 Quad) 에 시스템 Movable + Resizable 컴포넌트 부착.
+     * 사용자가 헤드셋 컨트롤러로 영상 창을 잡아 옮기고 크기 변경 가능.
+     * Resize 이벤트 시 Quad 의 Shape 을 새 크기로 갱신 — 안 그러면 사용자 인지 크기와 실제 렌더 크기가 어긋남.
+     */
+    private fun attachInteraction(s: Session) {
+        val ent = surfaceEntity ?: return
+        try {
+            val movable = MovableComponent.createSystemMovable(s, /* scaleInZ = */ true)
+            movable.addMoveListener(overlapTrackingListener)
+            ent.addComponent(movable)
+        } catch (e: Exception) {
+            Log.w(TAG, "SurfaceEntity Movable 실패: $e")
+        }
+        try {
+            val resizable = ResizableComponent.create(s) { event: ResizeEvent ->
+                val ns = event.newSize
+                try {
+                    ent.shape = SurfaceEntity.Shape.Quad(FloatSize2d(ns.width, ns.height))
+                    checkAndNotifyOverlap()
+                } catch (e: Exception) {
+                    Log.w(TAG, "resize Shape 갱신 실패: $e")
+                }
+            }
+            ent.addComponent(resizable)
+        } catch (e: Exception) {
+            Log.w(TAG, "SurfaceEntity Resizable 실패: $e")
+        }
+    }
+
+    /**
+     * Activity 의 MainPanelEntity(컨트롤 호스트) 에 Movable 부착.
+     * 사용자가 panel(컨트롤이 그려지는 표면) 자체를 잡아 옮길 수 있게 한다.
+     * MainActivity.onCreate 에서 XR SBS 모드 진입 후 호출.
+     */
+    fun enableMainPanelInteraction() {
+        val s = session ?: return
+        try {
+            val movable = MovableComponent.createSystemMovable(s)
+            movable.addMoveListener(overlapTrackingListener)
+            s.scene.mainPanelEntity.addComponent(movable)
+        } catch (e: Exception) {
+            Log.w(TAG, "MainPanel Movable 실패: $e")
+        }
+    }
+
+    /** Panel/Surface 둘 다 같은 리스너 사용 — 어느 쪽이 움직여도 겹침 재계산. */
+    private val overlapTrackingListener = object : EntityMoveListener {
+        override fun onMoveUpdate(
+            entity: Entity,
+            currentInputRay: androidx.xr.runtime.math.Ray,
+            currentPose: androidx.xr.runtime.math.Pose,
+            currentScale: Float,
+        ) {
+            checkAndNotifyOverlap()
+        }
+        override fun onMoveEnd(
+            entity: Entity,
+            finalInputRay: androidx.xr.runtime.math.Ray,
+            finalPose: androidx.xr.runtime.math.Pose,
+            finalScale: Float,
+            updatedParent: Entity?,
+        ) {
+            checkAndNotifyOverlap()
+        }
+    }
+
+    /**
+     * Panel(=컨트롤 호스트) 와 Surface Quad(=영상) 의 xy 평면 AABB 가 겹치는지 재계산.
+     * 상태가 바뀐 경우에만 [onPanelOverlapChanged] 콜백 호출 — 매 frame spam 방지.
+     */
+    private fun checkAndNotifyOverlap() {
+        val overlap = computeOverlap()
+        if (overlap != lastOverlap) {
+            lastOverlap = overlap
+            onPanelOverlapChanged?.invoke(overlap)
+        }
+    }
+
+    /** 겹침 판정. 정보 부족 시 안전하게 true(=겹침으로 가정) 반환 → 자동숨김 동작 유지. */
+    private fun computeOverlap(): Boolean {
+        val s = session ?: return true
+        val ent = surfaceEntity ?: return true
+        return try {
+            val panel = s.scene.mainPanelEntity
+            val panelPose = panel.getPose()
+            val panelSize = panel.size
+            val surfPose = ent.getPose()
+            val quad = ent.shape as? SurfaceEntity.Shape.Quad ?: return true
+            val surfExtents = quad.extents
+
+            val dx = abs(panelPose.translation.x - surfPose.translation.x)
+            val dy = abs(panelPose.translation.y - surfPose.translation.y)
+            val sumHalfX = (panelSize.width + surfExtents.width) / 2f
+            val sumHalfY = (panelSize.height + surfExtents.height) / 2f
+            !(dx > sumHalfX || dy > sumHalfY)
+        } catch (e: Exception) {
+            Log.w(TAG, "[Overlap] 계산 실패: $e")
+            true
+        }
+    }
+
     // ── 시네마 룸 모드 ───────────────────────────────────────────────────────
 
     /**
      * Full Space 전환 + 패스스루 OFF → XR 시네마 모드 진입.
      * Playing 이벤트 수신 시 호출.
-     * HOME_SPACE(2D 패널)에서는 SurfaceEntity가 렌더되지 않으므로
-     * requestFullSpaceMode() 로 openXrRendering=true 전환이 필수.
+     *
+     * 매니페스트의 PROPERTY_XR_ACTIVITY_START_MODE=FULL_SPACE_MANAGED 로
+     * MainActivity가 Full Space 로 시작되므로, 여기서는 requestFullSpaceMode() 만 호출.
+     * 이전에는 HOME→FULL 전환 후 SurfaceEntity 재생성이 필요했으나,
+     * 재생성 경로가 systemui(splitEngine)의 createExternalTextureSurface 크래시를
+     * 유발하는 것이 확인되어 제거했다 (null producer 경쟁 상태).
      */
     fun enterCinemaRoom() {
         val s = session ?: return
+        // 참고: Spatial Film 도 passthrough 유지하며 spatial panel 로 재생함.
+        // 따라서 passthrough 를 OFF 하거나 환경을 강제하지 않음.
         try {
             s.scene.requestFullSpaceMode()
-            Log.i(TAG, "시네마 룸 진입 — requestFullSpaceMode() 호출")
         } catch (e: Exception) {
             Log.w(TAG, "requestFullSpaceMode 실패: $e")
         }
-        val env = spatialEnvironment()
-        if (env != null) {
-            env.preferredPassthroughOpacity = 0.0f
-            Log.i(TAG, "시네마 룸 진입 — 패스스루 OFF")
+        // alpha/parent 안전망 — alpha13 default 가 무효화될 수 있어 명시 설정. SBS 검은 화면 회귀 방지.
+        val ent = surfaceEntity
+        if (ent != null) {
+            try {
+                ent.setAlpha(1.0f)
+                if (ent.parent == null) ent.parent = s.scene.activitySpace
+            } catch (e: Exception) {
+                Log.w(TAG, "SurfaceEntity alpha/parent 설정 실패: $e")
+            }
         }
         inCinemaRoom = true
-
-        // FULL_SPACE 전환 안정 대기 후 SurfaceEntity 재생성
-        // HOME_SPACE에서 생성된 SurfaceEntity는 FULL_SPACE에서 무효할 수 있음
-        val mp = lastMediaPlayer ?: return
-        handler.postDelayed({
-            if (!inCinemaRoom) return@postDelayed
-            Log.i(TAG, "시네마 룸 — ${RECREATE_DELAY_MS}ms 후 SurfaceEntity 재생성 시작")
-            val ok = setupStereoSurface(mp)
-            Log.i(TAG, "시네마 룸 — SurfaceEntity 재생성 결과=$ok")
-        }, RECREATE_DELAY_MS)
     }
 
     /**
@@ -221,7 +350,6 @@ class XrPlayerManager(private val activity: Activity) {
         exitCinemaRoom()
         try { surfaceEntity?.dispose() } catch (_: Exception) {}
         surfaceEntity = null
-        lastMediaPlayer = null
         session = null
     }
 

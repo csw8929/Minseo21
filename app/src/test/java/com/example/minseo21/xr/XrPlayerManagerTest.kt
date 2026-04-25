@@ -1,4 +1,4 @@
-package com.example.minseo21
+package com.example.minseo21.xr
 
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

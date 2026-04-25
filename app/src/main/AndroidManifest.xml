@@ -8,7 +8,11 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Galaxy XR / Android XR: required=false → 기존 단말에서도 정상 실행 -->
+    <!-- Galaxy XR(SM-I610)은 type.xr 미지원, api.spatial + xr.immersive 로 식별됨 -->
+    <!-- Spatial Film(com.hughhou.spatialfilm) 참고해서 immersive feature 도 추가 -->
     <uses-feature android:name="android.hardware.type.xr" android:required="false" />
+    <uses-feature android:name="android.software.xr.api.spatial" android:required="false" />
+    <uses-feature android:name="android.software.xr.immersive" android:required="false" />
 
     <application
         android:allowBackup="true"
@@ -20,10 +24,22 @@
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
         android:theme="@style/Theme.Minseo21">
+        <!-- Samsung Galaxy XR 전역 property (Spatial Film 참고) -->
+        <property
+            android:name="android.window.PROPERTY_ACTIVITY_XR_FLAGS"
+            android:value="system_app_integration_supported|turn_screen_on" />
+        <property
+            android:name="android.window.PROPERTY_XR_BOUNDARY_TYPE_RECOMMENDED"
+            android:value="XR_BOUNDARY_TYPE_NO_RECOMMENDATION" />
+
         <!-- 파일 브라우저: 앱 실행 시 첫 화면 -->
         <activity
             android:name=".FileListActivity"
             android:exported="true">
+            <!-- Samsung Galaxy XR: FileListActivity 는 Home 공간 앱 -->
+            <property
+                android:name="android.window.PROPERTY_XR_ACTIVITY_START_MODE"
+                android:value="XR_ACTIVITY_START_MODE_Home_Activity" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -31,11 +47,20 @@
         </activity>
 
         <!-- 플레이어: 파일/URI를 받아 재생 -->
+        <!-- XR 대응 (Samsung Galaxy XR Spatial Film 앱 참고):
+             - screenOrientation 제거: Full Space 는 orientation 개념 없음
+             - resizeableActivity=true: XR Managed 모드 요구사항
+             - configChanges 에 keyboard|navigation 추가: Session 무효화 방지
+             - PROPERTY_XR_ACTIVITY_START_MODE 값은 Samsung 전용 이름 사용
+               (Google 공식 docs 의 FULL_SPACE_MANAGED 는 Galaxy XR 에서 작동 X) -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode"
-            android:screenOrientation="fullSensor">
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode|keyboard|navigation">
+            <property
+                android:name="android.window.PROPERTY_XR_ACTIVITY_START_MODE"
+                android:value="XR_ACTIVITY_START_MODE_Full_Space_Activity" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
             </intent-filter>
