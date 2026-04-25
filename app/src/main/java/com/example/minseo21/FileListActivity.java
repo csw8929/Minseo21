@@ -31,6 +31,7 @@ import androidx.recyclerview.widget.DividerItemDecoration;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
+import com.example.minseo21.xr.XrFullSpaceLauncher;
 import com.google.android.material.tabs.TabLayout;
 
 import java.util.ArrayDeque;
@@ -52,6 +53,9 @@ public class FileListActivity extends AppCompatActivity {
     private static final String PREFS_NAME    = "player_prefs";
     private static final String KEY_LAST_STATE = "last_app_state";
     private static boolean hasCheckedResumeThisSession = false;
+
+    // XR Full Space launcher — non-XR 단말에선 일반 startActivity 와 동일 동작.
+    private XrFullSpaceLauncher xrLauncher;
 
     // ── 로컬 ──────────────────────────────────────────────────────────────────
     private FileItemAdapter localAdapter;
@@ -125,6 +129,8 @@ public class FileListActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_file_list);
+
+        xrLauncher = new XrFullSpaceLauncher(this);
 
         // NAS 경로 스택 복원 (onSaveInstanceState에서 저장됨)
         if (savedInstanceState != null) {
@@ -726,7 +732,7 @@ public class FileListActivity extends AppCompatActivity {
         intent.setData(uri);
         intent.putExtra("title", title);
         intent.putExtra("useTranscode", useTranscode);
-        startActivity(intent);
+        xrLauncher.startActivity(this, intent);
     }
 
     /** 파일 목록 뷰 다시 표시 (HLS 로딩 완료/실패 후 호출) */
@@ -1111,7 +1117,7 @@ public class FileListActivity extends AppCompatActivity {
         intent.setAction(Intent.ACTION_VIEW);
         intent.setData(uri);
         intent.putExtra("title", title);
-        startActivity(intent);
+        xrLauncher.startActivity(this, intent);
     }
 
     @Override
