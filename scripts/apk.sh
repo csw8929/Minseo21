@@ -23,6 +23,7 @@ declare -A DEVICE_NAMES=(
   [R3CT70FY0ZP]="폴드"
   [R3CX705W62D]="플립"
   [T813128GB25301890106]="미니"
+  [R34YA0007ZJ]="xr"
 )
 
 # 스크립트 위치에서 프로젝트 루트로 이동 — APK_FILE 이 상대 경로여도 작동.
@@ -88,6 +89,23 @@ uninstall_on_device() {
   adb -s "$serial" uninstall "$PACKAGE"
 }
 
+copy_to_clipboard() {
+  if command -v clip.exe &>/dev/null; then
+    clip.exe
+  elif command -v clip &>/dev/null; then
+    clip
+  elif command -v pbcopy &>/dev/null; then
+    pbcopy
+  elif command -v xclip &>/dev/null; then
+    xclip -selection clipboard
+  elif command -v xsel &>/dev/null; then
+    xsel --clipboard --input
+  else
+    echo "  (클립보드 복사 불가 — clip/pbcopy/xclip 없음)"
+    return 1
+  fi
+}
+
 logcat_on_device() {
   local serial="$1"
   read -rp "  grep pattern (빈 값=취소)> " pattern
@@ -97,12 +115,21 @@ logcat_on_device() {
   fi
   echo "  → $(display_name "$serial") logcat -c (버퍼 초기화)..."
   adb -s "$serial" logcat -c
+  clear
   echo "  → logcat | grep '$pattern'  — Ctrl+C 로 중단"
   echo ""
+  local tmpfile
+  tmpfile=$(mktemp)
   # 파이프라인 중단 (Ctrl+C) 시 스크립트 탈출 방지 — 메뉴로 복귀.
   trap ':' INT
-  adb -s "$serial" logcat | grep --line-buffered -- "$pattern" || true
+  adb -s "$serial" logcat | grep --line-buffered -- "$pattern" | tee "$tmpfile" || true
   trap - INT
+  local lines
+  lines=$(wc -l < "$tmpfile")
+  copy_to_clipboard < "$tmpfile"
+  echo ""
+  echo "  ✓ ${lines}줄 클립보드에 복사됨"
+  rm -f "$tmpfile"
 }
 
 # 디바이스 선택 서브메뉴. callback 함수 이름을 받아 선택된 시리얼로 호출.
@@ -116,6 +143,12 @@ pick_device_and_run() {
   if [ "${#devices[@]}" -eq 0 ]; then
     echo ""
     echo "  (연결된 디바이스 없음)"
+    return
+  fi
+  # 단말이 하나면 선택 없이 바로 실행.
+  if [ "${#devices[@]}" -eq 1 ]; then
+    echo ""
+    "$callback" "${devices[0]}"
     return
   fi
   echo ""
