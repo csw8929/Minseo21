@@ -1,5 +1,6 @@
 plugins {
     alias(libs.plugins.android.application)
+    alias(libs.plugins.kotlin.android)
 }
 
 android {
@@ -39,6 +40,10 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
+
+    kotlinOptions {
+        jvmTarget = "11"
+    }
 }
 
 dependencies {
@@ -51,6 +56,9 @@ dependencies {
     implementation("androidx.room:room-runtime:2.6.1")
     annotationProcessor("androidx.room:room-compiler:2.6.1")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    // Jetpack XR SDK — Galaxy XR / Android XR 지원 (alpha: API 변경 가능)
+    implementation("androidx.xr.scenecore:scenecore:1.0.0-alpha13")
+    implementation("com.google.guava:listenablefuture:1.0")
     testImplementation(libs.junit)
     androidTestImplementation(libs.ext.junit)
     androidTestImplementation(libs.espresso.core)

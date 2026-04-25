@@ -25,6 +25,8 @@ import android.widget.Toast;
 
 import androidx.activity.OnBackPressedCallback;
 import androidx.appcompat.app.AppCompatActivity;
+
+import com.example.minseo21.xr.XrPlaybackController;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
@@ -53,6 +55,11 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     private PlaybackSource currentSource;
     private boolean tracksLogged = false;
     private int videoW = 0, videoH = 0;
+
+    /** XR 부가 기능 통합 컨트롤러 — 비-XR 단말에선 모든 메서드 no-op. */
+    private XrPlaybackController xr;
+    /** VLC 출력이 일반 VLCVideoLayout 으로 갔는지 여부 (XR SurfaceEntity takeover 시 false). */
+    private boolean usingVideoLayout = true;
 
     private boolean rotationLocked = false;
 
@@ -101,6 +108,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     private ImageButton btnFastForward;
     private ImageButton btnPrev;
     private ImageButton btnNext;
+    private ImageButton btnBack;
     private SeekBar seekBar;
     private TextView tvCurrentTime;
     private TextView tvTotalTime;
@@ -109,6 +117,8 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean isSeeking = false;
     private boolean controlsVisible = false;
+    /** 컨트롤 자동숨김 허용 여부. 부가 기능(예: XR panel 이동)이 false 로 설정 가능. */
+    private boolean autoHideAllowed = true;
 
     private ScaleGestureDetector scaleGestureDetector;
     private float zoomFactor = 1.0f;
@@ -118,6 +128,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         topBar.setVisibility(View.GONE);
         centerControls.setVisibility(View.GONE);
         controlsOverlay.setVisibility(View.GONE);
+        btnBack.setVisibility(View.GONE);
         controlsVisible = false;
         // 회전 잠금 상태는 컨트롤 숨김과 무관하게 유지
     };
@@ -160,6 +171,9 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         super.onCreate(savedInstanceState);
 
         nasSyncManager = NasSyncManager.getInstance(this);
+        // XR 부가 기능 — 컨트롤러 생성자 안에서 XR 단말이면 window 배경을 투명으로 설정한다.
+        xr = new XrPlaybackController(new XrHost());
+        getLifecycle().addObserver(xr);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         WindowInsetsControllerCompat insetsCtrl =
@@ -192,6 +206,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         btnFastForward   = findViewById(R.id.btnFastForward);
         btnPrev          = findViewById(R.id.btnPrev);
         btnNext          = findViewById(R.id.btnNext);
+        btnBack          = findViewById(R.id.btnBack);
         seekBar          = findViewById(R.id.seekBar);
         tvCurrentTime    = findViewById(R.id.tvCurrentTime);
         tvTotalTime      = findViewById(R.id.tvTotalTime);
@@ -268,7 +283,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         handler.postDelayed(nasFlushTask, NAS_FLUSH_INTERVAL_MS);
 
         ArrayList<String> options = new ArrayList<>();
-        // HW 디코더: mediacodec_ndk(NDK) → mediacodec_jni(JNI) → 소프트웨어 순서로 시도
+        // HW 디코더 기본: mediacodec_ndk(NDK) → mediacodec_jni(JNI) → 소프트웨어 순서로 시도.
         options.add("--codec=mediacodec_ndk,mediacodec_jni,none");
         // 색심도: RV32 (32bit, 고색 재현). VLCVideoLayout(TextureView) → --vout=android-display 충돌
         options.add("--android-display-chroma=RV32");
@@ -280,10 +295,20 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         source.addVlcOptions(options);
         options.add("--input-fast-seek");
         if (subtitleMargin > 0) options.add("--sub-margin=" + subtitleMargin);
+        // 부가 기능 hook — 필요 시 옵션 추가/덮어쓰기 (XR 단말이면 mediacodec-dr 비활성 등).
+        xr.applyVlcOptions(options);
 
         libVLC = new LibVLC(this, options);
         mediaPlayer = new MediaPlayer(libVLC);
-        mediaPlayer.attachViews(videoLayout, null, false, true);
+
+        // 부가 기능 hook — SBS 검출 시 자체적으로 VLC 출력을 takeover. true 면 attachViews 생략.
+        String sourceName = source.syncKey != null ? source.syncKey
+                            : (currentTitle != null ? currentTitle : "");
+        usingVideoLayout = !xr.attemptStereoTakeover(mediaPlayer, sourceName);
+        if (usingVideoLayout) {
+            videoLayout.setVisibility(View.VISIBLE);
+            mediaPlayer.attachViews(videoLayout, null, false, true);
+        }
         mediaPlayer.getVLCVout().addCallback(this);
         mediaPlayer.setEventListener(event -> runOnUiThread(() -> handleVlcEvent(event)));
 
@@ -541,8 +566,11 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
                         IMedia.VideoTrack vt = (IMedia.VideoTrack) t;
                         videoW = vt.width;
                         videoH = vt.height;
+                        float ratio = videoH > 0 ? (float) videoW / videoH : 0f;
                         Log.i(TAG, "[VLC] Video Track: " + videoW + "x" + videoH);
                         Log.i(TAG, "[VLC] HW ACCEL: MediaCodec (qti/google) requested.");
+                        // 부가 기능 hook — 비율 기반 폴백 검출. takeover 시 controller 가 videoLayout 처리.
+                        xr.retryByRatio(mediaPlayer, videoW, videoH);
                         break;
                     }
                 }
@@ -623,6 +651,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
                 }
                 handler.removeCallbacks(savePositionTask);
                 handler.postDelayed(savePositionTask, SAVE_INTERVAL_MS);
+                xr.onPlayingEvent();
                 break;
             case MediaPlayer.Event.Paused:
             case MediaPlayer.Event.Stopped:
@@ -630,6 +659,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
                 btnPlayPause.setImageResource(R.drawable.ic_play);
                 handler.removeCallbacks(savePositionTask);
                 saveCurrentPosition();
+                xr.onPausedOrStopped();
                 showControls();
                 break;
             case MediaPlayer.Event.EndReached:
@@ -647,8 +677,6 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
                         handler.postDelayed(() -> playEpisode(next), 1000);
                     }
                 }
-                break;
-            case MediaPlayer.Event.Vout:
                 break;
             case MediaPlayer.Event.EncounteredError:
                 Log.e(TAG, "[Player] EncounteredError (URI=" + currentUriKey + ")");
@@ -761,6 +789,8 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         centerControls.setOnClickListener(v -> resetHideTimer());
         controlsOverlay.setOnClickListener(v -> resetHideTimer());
 
+        btnBack.setOnClickListener(v -> finish());
+
         btnPlayPause.setOnClickListener(v -> {
             if (mediaPlayer == null) return;
             if (mediaPlayer.isPlaying()) mediaPlayer.pause();
@@ -802,8 +832,11 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         });
 
         btnSpeed.setOnClickListener(v -> {
-            handler.removeCallbacks(hideControls);
+            // 모달 다이얼로그가 떠 있는 동안 hide 가 발생해도 시각적 영향 없음.
+            // 단, 다이얼로그 dismiss 시 setOnDismissListener 에서 다시 resetHideTimer 가 호출되도록 해서
+            // 외부 탭/시스템 dismiss 경로에서도 자동숨김이 영구 정지되지 않게 보장한다.
             showSpeedDialog();
+            resetHideTimer();
         });
 
         btnRotationLock.setOnClickListener(v -> {
@@ -819,8 +852,8 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         });
 
         btnOptions.setOnClickListener(v -> {
-            handler.removeCallbacks(hideControls);
             showOptionsMenu();
+            resetHideTimer();
         });
 
         seekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -855,6 +888,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             topBar.setVisibility(View.GONE);
             centerControls.setVisibility(View.GONE);
             controlsOverlay.setVisibility(View.GONE);
+            btnBack.setVisibility(View.GONE);
             controlsVisible = false;
         } else {
             showControls();
@@ -865,16 +899,19 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         topBar.setVisibility(View.VISIBLE);
         centerControls.setVisibility(View.VISIBLE);
         controlsOverlay.setVisibility(View.VISIBLE);
+        btnBack.setVisibility(View.VISIBLE);
         controlsVisible = true;
         resetHideTimer();
     }
 
     private void scheduleHide() {
+        if (!autoHideAllowed) return;
         handler.postDelayed(hideControls, CONTROLS_HIDE_DELAY_MS);
     }
 
     private void resetHideTimer() {
         handler.removeCallbacks(hideControls);
+        if (!autoHideAllowed) return;
         handler.postDelayed(hideControls, CONTROLS_HIDE_DELAY_MS);
     }
 
@@ -907,6 +944,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
                     resetHideTimer();
                 })
                 .setNegativeButton("취소", (dialog, w) -> resetHideTimer())
+                .setOnDismissListener(d -> resetHideTimer())
                 .show();
     }
 
@@ -1205,6 +1243,12 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     }
 
     @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        xr.onWindowFocused(hasFocus);
+    }
+
+    @Override
     public void onConfigurationChanged(Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         if (currentScreenMode > 0) {
@@ -1224,8 +1268,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     }
 
     @Override
-    public void onSurfacesDestroyed(IVLCVout vlcVout) {
-    }
+    public void onSurfacesDestroyed(IVLCVout vlcVout) {}
 
     @Override
     protected void onResume() {
@@ -1279,4 +1322,20 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     @Override public Context getContext() { return this; }
     @Override public LibVLC getLibVLC() { return libVLC; }
     @Override public MediaPlayer getMediaPlayer() { return mediaPlayer; }
+
+    // ── XrPlaybackController.Host (좁은 콜백 인터페이스) ──────────────────────
+    /** XR 컨트롤러가 메인 Activity 의 view/handler/컨트롤 토글에 접근할 때 사용하는 어댑터.
+     *  inner class 로 두어 MainActivity 본문은 일반 동작에만 집중. */
+    private final class XrHost implements XrPlaybackController.Host {
+        @Override public android.app.Activity getActivity() { return MainActivity.this; }
+        @Override public View getContentRoot() { return findViewById(R.id.root); }
+        @Override public org.videolan.libvlc.util.VLCVideoLayout getVideoLayout() { return videoLayout; }
+        @Override public Handler getMainHandler() { return handler; }
+        @Override public void setAutoHideAllowed(boolean allowed) {
+            autoHideAllowed = allowed;
+            if (!allowed) handler.removeCallbacks(hideControls);
+            else resetHideTimer();
+        }
+        @Override public void requestShowControls() { showControls(); }
+    }
 }
