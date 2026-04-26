@@ -34,39 +34,22 @@ class XrPlayerManager(private val activity: Activity) {
 
     companion object {
         private const val TAG = "SACH_XR"
-        // 영상 Quad 의 시작 위치/크기 — 사용자는 MovableComponent/ResizableComponent 로 변경 가능.
-        private val SCREEN_POSE  = Pose(Vector3(0f, 0.3f, -3.0f))
-        private val SCREEN_SHAPE = SurfaceEntity.Shape.Quad(FloatSize2d(3.2f, 1.8f))
-        // 시네마 룸 진입/퇴장 fade 길이 (ms). AccelerateDecelerateInterpolator 와 함께 자연스러운 명암 전환.
-        private const val PASSTHROUGH_FADE_MS = 400L
 
         // ── 순수 함수 (Android 의존 없음 — JUnit 직접 테스트 가능) ─────────────
         internal fun sbsPatternMatch(name: String): Boolean {
             val lower = name.lowercase()
-            return lower.contains("_sbs") ||
-                   lower.contains("_3d")  ||
-                   lower.contains(".sbs.") ||
-                   lower.contains("[sbs]") ||
-                   lower.contains("[3d]")
+            return XrConfig.SBS_FILENAME_KEYWORDS.any { lower.contains(it) }
         }
 
         internal fun sbsRatioMatch(videoW: Int, videoH: Int): Boolean {
             if (videoH <= 0) return false
-            return videoW.toFloat() / videoH >= 3.5f
+            return videoW.toFloat() / videoH >= XrConfig.SBS_RATIO_THRESHOLD
         }
     }
 
-    // Galaxy XR(SM-I610)은 android.hardware.type.xr 대신
-    // android.software.xr.api.spatial 또는 android.hardware.xr.input.controller 를 사용
-    val isXrDevice: Boolean = with(activity.packageManager) {
-        hasSystemFeature("android.hardware.type.xr") ||
-        hasSystemFeature("android.software.xr.api.spatial") ||
-        hasSystemFeature("android.hardware.xr.input.controller")
-    }.also { result ->
-        Log.i(TAG, "[isXrDevice] " + result +
-            " (type.xr=" + activity.packageManager.hasSystemFeature("android.hardware.type.xr") +
-            " xr.api.spatial=" + activity.packageManager.hasSystemFeature("android.software.xr.api.spatial") +
-            " xr.input.controller=" + activity.packageManager.hasSystemFeature("android.hardware.xr.input.controller") + ")")
+    // XR 단말 검출 — feature flag 기반 (XrConfig 가 source of truth).
+    val isXrDevice: Boolean = XrConfig.isXrDevice(activity.packageManager).also { result ->
+        Log.i(TAG, "[isXrDevice] $result (features=${XrConfig.DEVICE_FEATURES.joinToString()})")
     }
 
     private var session: Session? = null
@@ -91,6 +74,66 @@ class XrPlayerManager(private val activity: Activity) {
             }
         } catch (e: Exception) {
             Log.w(TAG, "XR Session 생성 예외: $e")
+        }
+    }
+
+    /**
+     * Activity mainPanelEntity 시작 크기 설정.
+     *
+     * **2026-04-26 결론**: 일반 2D path 의 mainPanelEntity 에 MovableComponent/ResizableComponent
+     * 부착은 SDK alpha13 에서 system 측에 무시됨(부착 자체는 성공하지만 grab handle 표시도 reform 도
+     * 발생 안 함). 1~4차 다양한 옵션 조합 시도 후 결론. 따라서 일반 2D panel grab/resize 는
+     * SDK 한계로 현재 불가 — SBS 영상의 SurfaceEntity Quad 에서만 가능.
+     * 추가로 component 부착이 spatial state 에 input 을 남겨 다음 Activity 로 inheritance 되는
+     * side effect 의심 → 부착 자체 제거.
+     *
+     * [init] 호출 후 session 이 살아있을 때 한 번만 호출.
+     */
+    fun setupMainPanelSpatial() {
+        if (!isXrDevice) return
+        val s = session ?: return
+        val panel = try {
+            s.scene.mainPanelEntity
+        } catch (e: Exception) {
+            Log.w(TAG, "mainPanelEntity 접근 실패: $e"); return
+        }
+
+        try {
+            panel.size = XrConfig.PANEL_INITIAL_SIZE
+            Log.i(TAG, "mainPanelEntity.size = ${XrConfig.PANEL_INITIAL_SIZE}")
+        } catch (e: Exception) {
+            Log.w(TAG, "panel.size 설정 실패: $e")
+        }
+    }
+
+    /**
+     * SBS 진입 시 mainPanel 을 사용자 시야에서 사실상 제거 — size 0.01×0.01m.
+     * Movable/Resizable component 는 그대로 (lifecycle 비용 회피). size 가 작아 사용자 ray 가 거의 hit 안 함.
+     * SurfaceEntity 가 SBS 영상의 grab 처리 담당.
+     */
+    fun shrinkMainPanelForSbs() {
+        if (!isXrDevice) return
+        val s = session ?: return
+        try {
+            s.scene.mainPanelEntity.size = FloatSize2d(0.01f, 0.01f)
+            Log.i(TAG, "SBS 진입: mainPanel size 0.01×0.01 (invisible)")
+        } catch (e: Exception) {
+            Log.w(TAG, "shrinkMainPanelForSbs 실패: $e")
+        }
+    }
+
+    /**
+     * 비-SBS(일반 2D) 영상 진입 시 mainPanel size 를 [XrConfig.PANEL_INITIAL_SIZE] 로 복원.
+     * 매 영상 시작마다 호출되어 직전 SBS 영상 잔존 영향 제거.
+     */
+    fun restoreMainPanelSize() {
+        if (!isXrDevice) return
+        val s = session ?: return
+        try {
+            s.scene.mainPanelEntity.size = XrConfig.PANEL_INITIAL_SIZE
+            Log.i(TAG, "mainPanel size 복원: ${XrConfig.PANEL_INITIAL_SIZE}")
+        } catch (e: Exception) {
+            Log.w(TAG, "restoreMainPanelSize 실패: $e")
         }
     }
 
@@ -135,8 +178,8 @@ class XrPlayerManager(private val activity: Activity) {
             currentResizable = null
             surfaceEntity = SurfaceEntity.create(
                 s,
-                SCREEN_POSE,
-                SCREEN_SHAPE,
+                XrConfig.SCREEN_POSE,
+                XrConfig.SCREEN_SHAPE,
                 SurfaceEntity.StereoMode.SIDE_BY_SIDE,
             )
             // MediaBlendingMode 를 OPAQUE 로 명시 — default(TRANSPARENT)면 비디오 투명 렌더됨.
@@ -148,9 +191,7 @@ class XrPlayerManager(private val activity: Activity) {
             // Surface 의 픽셀 크기를 libVLC 비디오 크기와 맞춤. 누락 시 frame mismatch 로 검은 화면 발생.
             try {
                 @Suppress("OPT_IN_USAGE")
-                surfaceEntity?.setSurfacePixelDimensions(
-                    androidx.xr.runtime.math.IntSize2d(1920, 1080)
-                )
+                surfaceEntity?.setSurfacePixelDimensions(XrConfig.SURFACE_PIXEL_DIM)
             } catch (e: Exception) {
                 Log.w(TAG, "setSurfacePixelDimensions 실패: $e")
             }
@@ -260,7 +301,7 @@ class XrPlayerManager(private val activity: Activity) {
      *
      * 매니페스트의 PROPERTY_XR_ACTIVITY_START_MODE 로 MainActivity 가 Full Space 로
      * 시작되므로, 여기서는 requestFullSpaceMode() 안전망 호출 + passthrough opacity 를
-     * 0.0 으로 [PASSTHROUGH_FADE_MS] 동안 fade 시킨다.
+     * 0.0 으로 [XrConfig.PASSTHROUGH_FADE_MS] 동안 fade 시킨다.
      */
     fun enterCinemaRoom() {
         val s = session ?: return
@@ -284,8 +325,12 @@ class XrPlayerManager(private val activity: Activity) {
     }
 
     /**
-     * Home Space 복귀 + 패스스루 fade-in 복원.
-     * onPause / 재생 중단 / 비-SBS 전환 시 반드시 호출.
+     * 패스스루 fade-in 복원 (재생 일시정지/중단 시).
+     *
+     * **2026-04-26 변경**: 이전엔 여기서 `requestHomeSpaceMode()` 까지 호출해 Full Space 자체를 빠져나갔지만,
+     * pause/play 토글마다 mode 전환이 일어나 화면 깜빡임 + back 후 list panel 위치 어긋남 문제 발생.
+     * **이제 pause 는 passthrough fade 만** — Full Space 는 유지. mode 전환은 [release] (onDestroy) 에서만.
+     * 사용자가 다시 play 하면 [enterCinemaRoom] 이 fade 0 으로 되돌리니 자연스럽게 시네마 룸 복귀.
      */
     fun exitCinemaRoom() {
         if (!inCinemaRoom) return
@@ -301,12 +346,6 @@ class XrPlayerManager(private val activity: Activity) {
                 }
             }
         })
-        try {
-            session?.scene?.requestHomeSpaceMode()
-            Log.i(TAG, "시네마 룸 종료 요청 — requestHomeSpaceMode()")
-        } catch (e: Exception) {
-            Log.w(TAG, "requestHomeSpaceMode 실패: $e")
-        }
         inCinemaRoom = false
     }
 
@@ -339,7 +378,7 @@ class XrPlayerManager(private val activity: Activity) {
             return
         }
         val anim = ValueAnimator.ofFloat(from, targetOpacity).apply {
-            duration = PASSTHROUGH_FADE_MS
+            duration = XrConfig.PASSTHROUGH_FADE_MS
             interpolator = AccelerateDecelerateInterpolator()
             // ~30Hz throttle: 마지막 적용 시각 추적해 33ms 간격으로만 SDK 호출.
             var lastApplyMs = 0L
@@ -368,7 +407,7 @@ class XrPlayerManager(private val activity: Activity) {
         }
         passthroughAnimator = anim
         anim.start()
-        Log.i(TAG, "passthrough fade ${from} → ${targetOpacity} (${PASSTHROUGH_FADE_MS}ms)")
+        Log.i(TAG, "passthrough fade ${from} → ${targetOpacity} (${XrConfig.PASSTHROUGH_FADE_MS}ms)")
     }
 
     /** 즉시 passthrough 강제 복귀 — onPause / onDestroy 안전망. fade 진행 중이라도 cancel 후 1.0 즉시 적용. */
@@ -404,14 +443,39 @@ class XrPlayerManager(private val activity: Activity) {
         }
     }
 
-    /** onDestroy 에서 호출. SurfaceEntity 해제. Session 은 LifecycleOwner 가 관리. */
+    /**
+     * onDestroy 에서 호출. SurfaceEntity 해제 + Full Space → Home Space 명시 복귀.
+     * Session 은 LifecycleOwner 가 관리.
+     *
+     * **2026-04-26**: pause 시점에서 빠진 `requestHomeSpaceMode()` 가 여기로 이동.
+     * 다음 Activity (FileListActivity) 가 Home Space 에서 깨끗한 panel 로 시작하도록 보장.
+     */
     fun release() {
         handler.removeCallbacksAndMessages(null)
         forcePassthroughRestore()
         try { surfaceEntity?.dispose() } catch (_: Exception) {}
         surfaceEntity = null
         currentResizable = null
-        inCinemaRoom = false
+        // 2026-04-26: 우리가 변경한 mainPanel.size + 사용자가 grab 시도로 변경된 pose 를
+        // system default 로 reset. 안 하면 다음 Activity(FileListActivity) 가 inheritance 해
+        // "list 화면 위로 이동" 현상 발생.
+        try {
+            val panel = session?.scene?.mainPanelEntity
+            panel?.size = FloatSize2d(0.88900006f, 0.555625f)
+            panel?.setPose(androidx.xr.runtime.math.Pose(), androidx.xr.scenecore.Space.PARENT)
+            Log.i(TAG, "release: mainPanel size+pose system default 로 reset")
+        } catch (e: Exception) {
+            Log.w(TAG, "release mainPanel reset 실패: $e")
+        }
+        if (inCinemaRoom) {
+            try {
+                session?.scene?.requestHomeSpaceMode()
+                Log.i(TAG, "release: Full Space → Home Space 복귀")
+            } catch (e: Exception) {
+                Log.w(TAG, "release requestHomeSpaceMode 실패: $e")
+            }
+            inCinemaRoom = false
+        }
         session = null
     }
 

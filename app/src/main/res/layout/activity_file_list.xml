@@ -178,6 +178,19 @@
                 android:textColor="#FFFFFF" />
         </LinearLayout>
 
+        <!-- XR 단말 전용 floating Back 버튼 — 시스템 back 제스처 대체 -->
+        <ImageButton
+            android:id="@+id/btnXrBack"
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:layout_gravity="bottom|end"
+            android:layout_marginEnd="24dp"
+            android:layout_marginBottom="24dp"
+            android:background="@drawable/bg_red_circle"
+            android:src="@drawable/ic_back"
+            android:contentDescription="뒤로가기"
+            android:visibility="gone" />
+
     </FrameLayout>
 
 </LinearLayout>

@@ -250,6 +250,14 @@ public class FileListActivity extends AppCompatActivity {
             }
         });
 
+        // XR 단말 전용 floating back 버튼 — 헤드셋 시스템 back 제스처가 어색해 명시 버튼 제공.
+        // 클릭 시 위 OnBackPressedCallback 을 그대로 트리거하여 동일 동작(NAS stack pop / 즐겨찾기→로컬 / 버킷 list / 종료).
+        ImageButton btnXrBack = findViewById(R.id.btnXrBack);
+        if (com.example.minseo21.xr.XrConfig.isXrDevice(getPackageManager())) {
+            btnXrBack.setVisibility(View.VISIBLE);
+            btnXrBack.setOnClickListener(v -> getOnBackPressedDispatcher().onBackPressed());
+        }
+
         checkPermissionAndLoad();
 
         // 복원된 탭이 로컬이 아니면 그 탭을 선택 (onTabSelected 리스너가 해당 뷰를 표시)

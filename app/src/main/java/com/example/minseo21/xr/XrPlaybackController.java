@@ -57,30 +57,52 @@ public class XrPlaybackController implements DefaultLifecycleObserver {
         if (xrManager.isXrDevice()) {
             host.getActivity().getWindow().setBackgroundDrawable(
                     new ColorDrawable(Color.TRANSPARENT));
+            // 일반 2D 영상이 그려지는 Activity main panel 에 Movable + Resizable 부착 + 시작 크기 설정.
+            // SBS path 는 SurfaceEntity 별 layer 가 grab 처리하므로 이 mainPanel 부착과 충돌 없음.
+            xrManager.setupMainPanelSpatial();
         }
     }
 
     /** libVLC options 빌드 시 호출. XR 단말이면 codec 을 jni 로 고정하고 DR 비활성 (SBS 검은 화면 방지).
-     *  GL 기반 SurfaceEntity 와 mediacodec_ndk + 직접 렌더링 조합이 충돌하므로 mediacodec_jni 로 강제한다. */
+     *  GL 기반 SurfaceEntity 와 mediacodec_ndk + 직접 렌더링 조합이 충돌하므로 mediacodec_jni 로 강제한다.
+     *  추가로 OLEDoS 패널(DCI-P3 95%, 명암비 무한대) 활용을 위해 SDR 색강화 필터를 켠다. */
     public void applyVlcOptions(List<String> options) {
         if (!xrManager.isXrDevice()) return;
         options.removeIf(opt -> opt != null && opt.startsWith("--codec="));
         options.add("--codec=mediacodec_jni,none");
         options.add("--no-mediacodec-dr");
+        // 색강화: adjust 모듈로 saturation/contrast 미세 강화. OLEDoS 명암비 + DCI-P3 95% 활용.
+        // 값은 XrConfig 가 source of truth — 미세조정은 거기서.
+        options.add("--video-filter=adjust");
+        options.add("--saturation=" + XrConfig.COLOR_SATURATION);
+        options.add("--contrast=" + XrConfig.COLOR_CONTRAST);
+        // 공간 음향(가상 surround) 폐기 결정 — 2026-04-26.
+        // 1) 가상 surround 는 stereo 2채널을 5.1 6채널로 임의 합성해 원본 mix 의도 왜곡.
+        //    HRTF 도 generic 두상 기준이라 음색 변화 비용 큼.
+        // 2) 영상 panel 과 정합되는 head-tracking spatial 은 Galaxy XR system Spatializer 가
+        //    AudioAttributes 없이도 자동 처리 — 우리가 audio chain 건드릴 필요 없음.
+        // 3) headphone(--audio-filter=headphone) 시도는 mediacodec_jni audio output 과 호환 안 돼 ANR.
     }
 
     /**
      * mediaPlayer 생성 직후 호출. 파일명으로 SBS 검출되면 SurfaceEntity 로 takeover.
      * @return true 면 호출자는 {@code mediaPlayer.attachViews(videoLayout, ...)} 를 생략해야 함.
+     *
+     * mainPanel size 처리 — 매 영상 시작마다 default(비-SBS)로 복원 후 SBS 결정 시 shrink.
+     * 직전 영상이 SBS였더라도 다음 비-SBS 영상에서 panel 정상 복원 보장.
      */
     public boolean attemptStereoTakeover(MediaPlayer mp, String sourceName) {
         stereoActive = false;
         aspectApplied = false;
+        // 1) 매번 비-SBS default 로 복원 (직전 SBS 잔존 영향 제거)
+        xrManager.restoreMainPanelSize();
         if (!xrManager.isXrDevice()) return false;
         if (!xrManager.isSbsByName(sourceName)) return false;
         if (!xrManager.setupStereoSurface(mp)) return false;
         stereoActive = true;
         applySpatialUi();
+        // 2) SBS 확정 — mainPanel 사실상 invisible (SurfaceEntity 가 grab 처리 전담)
+        xrManager.shrinkMainPanelForSbs();
         xrManager.enterCinemaRoom();
         return true;
     }
@@ -99,6 +121,8 @@ public class XrPlaybackController implements DefaultLifecycleObserver {
             if (!xrManager.setupStereoSurface(mp)) return;
             stereoActive = true;
             applySpatialUi();
+            // 비율 폴백으로 SBS 확정 — mainPanel 사실상 invisible
+            xrManager.shrinkMainPanelForSbs();
             xrManager.enterCinemaRoom();
             sbs = true;
             newlyActivated = true;
