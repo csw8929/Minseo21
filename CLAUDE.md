@@ -58,6 +58,31 @@ Minseo21 (app name: "삿치") is an Android video player app built with Java and
 
 The app UI and code comments are in Korean. Maintain Korean for user-facing strings and comments.
 
+
+## XR (Galaxy XR) 확장 — 분리 원칙
+
+**메인 기능은 일반 안드로이드 단말 (libVLC 비디오 플레이어). XR 은 부가 확장.**
+이 관계가 코드 구조에 그대로 드러나야 한다.
+
+원칙:
+- **모든 XR 코드는 `com.example.minseo21.xr` 패키지에 모은다.**
+  현재 멤버: `XrConfig.kt` (단말/SBS 검출 + screen pose/shape), `XrFullSpaceLauncher.java` (Bundle launch),
+  `XrSurfaceController.kt` (SurfaceEntity 양안 렌더링 + Movable/Resizable + 비율 적용).
+- **`MainActivity` 는 매니페스트 무수정 (옵션 B 핵심) — Home Space + system mainPanel decoration 정상.**
+  코드 변경은 protected hook 3개 (`onConfigureVlcOptions` / `attemptStereoTakeover` / `onVideoTrackInfo`) 추가 + 호출 지점 삽입만.
+  모두 기본 no-op/false 라 비-XR 단말 동작 0 변경.
+- **`FileListActivity` 의 XR 흔적은 `XrFullSpaceLauncher` 필드 한 개 + 라우팅 분기 한 곳 (파일명 SBS keyword 검출 시 `SbsPlayerActivity` 로 launch) 만.**
+- **SBS 3D path 는 별 Activity (`SbsPlayerActivity extends MainActivity`) 로 분리한다.**
+  - SbsPlayerActivity 매니페스트 entry 만 `XR_ACTIVITY_START_MODE_Full_Space_Activity`. MainActivity 는 무수정.
+  - SbsPlayerActivity 가 protected hook override 로 SurfaceEntity takeover 만 처리 — 모든 재생 기능(이어보기/자막/오디오 트랙/스피드/즐겨찾기/Playlist)은 부모 inherit.
+  - 자식의 hook 의존 필드 (`xr` 등) 는 `super.onCreate` _전_ 에 초기화 — 부모 onCreate 가 동기로 hook 발화하는 race 회피 (2026-04-26 logcat 진단으로 확인).
+- **메인의 일반 동작은 비-XR 단말에서도 항상 정상이어야 한다.**
+  XR 분기로 메인 동작 흐름을 깨거나, XR 전용 상태 변수가 일반 로직에 스며들지 않게 한다.
+- **새 XR 기능을 추가할 때**: `xr/` 패키지에 클래스/메서드 추가 + 필요 시 MainActivity 의 protected hook 한 개 추가. 메인 흐름에 새 if 블록·새 필드를 만들지 않는다.
+
+이 원칙은 사용자가 명시적으로 요구한 사항(2026-04-25, 옵션 B 디자인 2026-04-26 에서 강화). 이상은 "메인을 보면 XR 코드가 거의 안 보이는 것".
+
+
 ## Skill routing
 
 When the user's request matches an available skill, ALWAYS invoke it using the Skill
