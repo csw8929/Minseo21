@@ -14,8 +14,6 @@ import org.videolan.libvlc.util.VLCVideoLayout;
 
 import java.util.List;
 
-import kotlin.Unit;
-
 /**
  * MainActivity 가 직접 XR API 를 다루지 않도록 모든 XR hook 을 통합한 컨트롤러.
  *
@@ -36,21 +34,19 @@ import kotlin.Unit;
  */
 public class XrPlaybackController implements DefaultLifecycleObserver {
 
-    /** MainActivity 가 컨트롤러에 노출하는 좁은 인터페이스 — view/handler/컨트롤 토글만. */
+    /** MainActivity 가 컨트롤러에 노출하는 좁은 인터페이스 — view/handler 만. */
     public interface Host {
         Activity getActivity();
         /** activity_main.xml 의 root FrameLayout — XR 진입 시 배경 투명 처리 대상. */
         View getContentRoot();
         VLCVideoLayout getVideoLayout();
         Handler getMainHandler();
-        /** 자동숨김 허용 여부. false 면 컨트롤이 영구 표시되어야 함. */
-        void setAutoHideAllowed(boolean allowed);
-        void requestShowControls();
     }
 
     private final Host host;
     private final XrPlayerManager xrManager;
     private boolean stereoActive = false;
+    private boolean aspectApplied = false;
 
     public XrPlaybackController(Host host) {
         this.host = host;
@@ -79,6 +75,7 @@ public class XrPlaybackController implements DefaultLifecycleObserver {
      */
     public boolean attemptStereoTakeover(MediaPlayer mp, String sourceName) {
         stereoActive = false;
+        aspectApplied = false;
         if (!xrManager.isXrDevice()) return false;
         if (!xrManager.isSbsByName(sourceName)) return false;
         if (!xrManager.setupStereoSurface(mp)) return false;
@@ -89,17 +86,31 @@ public class XrPlaybackController implements DefaultLifecycleObserver {
     }
 
     /**
-     * 트랙 정보 로딩 후 호출 — 파일명 기반 검출 실패 시 비율로 폴백.
-     * 이미 takeover 됐으면 no-op.
+     * 트랙 정보 로딩 후 호출 — 파일명 기반 검출 실패 시 비율로 폴백 + 영상 비율 잠금.
+     * 이미 takeover + 비율 적용 완료된 상태면 no-op (반복 호출이 사용자 수동 리사이즈를 clobber 하지 않도록).
      */
     public void retryByRatio(MediaPlayer mp, int videoW, int videoH) {
-        if (stereoActive) return;
         if (!xrManager.isXrDevice()) return;
-        if (!xrManager.isSbsByRatio(videoW, videoH)) return;
-        if (!xrManager.setupStereoSurface(mp)) return;
-        stereoActive = true;
-        applySpatialUi();
-        xrManager.enterCinemaRoom();
+        boolean sbs;
+        boolean newlyActivated = false;
+        if (stereoActive) {
+            sbs = true;
+        } else if (xrManager.isSbsByRatio(videoW, videoH)) {
+            if (!xrManager.setupStereoSurface(mp)) return;
+            stereoActive = true;
+            applySpatialUi();
+            xrManager.enterCinemaRoom();
+            sbs = true;
+            newlyActivated = true;
+        } else {
+            return;
+        }
+        // applyVideoAspect 는 신규 활성화된 경우에만 호출 — 이미 적용된 SurfaceEntity 에 또 적용하면
+        // 사용자가 수동 리사이즈한 Quad 가 매번 source aspect 로 되돌아감.
+        if (newlyActivated || !aspectApplied) {
+            xrManager.applyVideoAspect(videoW, videoH, sbs);
+            aspectApplied = true;
+        }
     }
 
     /** VLC Playing 이벤트 — 시네마룸 재진입 안전망. */
@@ -131,18 +142,10 @@ public class XrPlaybackController implements DefaultLifecycleObserver {
 
     // ── 내부 ────────────────────────────────────────────────────────────────
 
-    /** SBS takeover 성공 시 spatial UI 적용 — videoLayout 숨김, root 투명, panel 인터랙션 + 겹침 추적. */
+    /** SBS takeover 성공 시 spatial UI 적용 — videoLayout 숨김 + root 투명. 컨트롤은 영상 Quad 내부 자동숨김으로 동작. */
     private void applySpatialUi() {
         host.getVideoLayout().setVisibility(View.GONE);
         View root = host.getContentRoot();
         if (root != null) root.setBackgroundColor(Color.TRANSPARENT);
-        xrManager.enableMainPanelInteraction();
-        xrManager.setOnPanelOverlapChanged(overlap -> {
-            host.getMainHandler().post(() -> {
-                host.setAutoHideAllowed(overlap);
-                if (!overlap) host.requestShowControls();
-            });
-            return Unit.INSTANCE;
-        });
     }
 }
