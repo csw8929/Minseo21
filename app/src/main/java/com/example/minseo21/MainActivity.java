@@ -117,8 +117,6 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean isSeeking = false;
     private boolean controlsVisible = false;
-    /** 컨트롤 자동숨김 허용 여부. 부가 기능(예: XR panel 이동)이 false 로 설정 가능. */
-    private boolean autoHideAllowed = true;
 
     private ScaleGestureDetector scaleGestureDetector;
     private float zoomFactor = 1.0f;
@@ -905,13 +903,11 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     }
 
     private void scheduleHide() {
-        if (!autoHideAllowed) return;
         handler.postDelayed(hideControls, CONTROLS_HIDE_DELAY_MS);
     }
 
     private void resetHideTimer() {
         handler.removeCallbacks(hideControls);
-        if (!autoHideAllowed) return;
         handler.postDelayed(hideControls, CONTROLS_HIDE_DELAY_MS);
     }
 
@@ -1324,18 +1320,12 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     @Override public MediaPlayer getMediaPlayer() { return mediaPlayer; }
 
     // ── XrPlaybackController.Host (좁은 콜백 인터페이스) ──────────────────────
-    /** XR 컨트롤러가 메인 Activity 의 view/handler/컨트롤 토글에 접근할 때 사용하는 어댑터.
+    /** XR 컨트롤러가 메인 Activity 의 view/handler 에 접근할 때 사용하는 어댑터.
      *  inner class 로 두어 MainActivity 본문은 일반 동작에만 집중. */
     private final class XrHost implements XrPlaybackController.Host {
         @Override public android.app.Activity getActivity() { return MainActivity.this; }
         @Override public View getContentRoot() { return findViewById(R.id.root); }
         @Override public org.videolan.libvlc.util.VLCVideoLayout getVideoLayout() { return videoLayout; }
         @Override public Handler getMainHandler() { return handler; }
-        @Override public void setAutoHideAllowed(boolean allowed) {
-            autoHideAllowed = allowed;
-            if (!allowed) handler.removeCallbacks(hideControls);
-            else resetHideTimer();
-        }
-        @Override public void requestShowControls() { showControls(); }
     }
 }
