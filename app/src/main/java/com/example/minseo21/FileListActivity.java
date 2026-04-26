@@ -24,6 +24,8 @@ import android.widget.ImageButton;
 
 import androidx.annotation.NonNull;
 import androidx.activity.OnBackPressedCallback;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
@@ -125,6 +127,17 @@ public class FileListActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_file_list);
+
+        // System bar (status / navigation / Samsung taskbar) 영역에 layout 침범 방지.
+        // fitsSystemWindows 만으로 일부 단말(특히 Samsung One UI taskbar) 에선 inset 이 안 들어오므로
+        // 명시적으로 systemBars inset 을 root padding 에 적용.
+        View fileListRoot = findViewById(R.id.fileListRoot);
+        ViewCompat.setOnApplyWindowInsetsListener(fileListRoot, (v, insets) -> {
+            int top = insets.getInsets(WindowInsetsCompat.Type.systemBars()).top;
+            int bottom = insets.getInsets(WindowInsetsCompat.Type.systemBars()).bottom;
+            v.setPadding(0, top, 0, bottom);
+            return insets;
+        });
 
         // NAS 경로 스택 복원 (onSaveInstanceState에서 저장됨)
         if (savedInstanceState != null) {
@@ -243,6 +256,11 @@ public class FileListActivity extends AppCompatActivity {
                 }
             }
         });
+
+        // Floating Back 버튼 — 모든 단말 표시. 클릭 시 위 OnBackPressedCallback 트리거
+        // (NAS stack pop / 즐겨찾기→로컬 / 버킷 list / 종료 모두 시스템 back 과 동일).
+        ImageButton btnBack = findViewById(R.id.btnBack);
+        btnBack.setOnClickListener(v -> getOnBackPressedDispatcher().onBackPressed());
 
         checkPermissionAndLoad();
 

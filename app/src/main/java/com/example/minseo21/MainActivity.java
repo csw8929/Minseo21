@@ -93,6 +93,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
     private View controlsOverlay;
     private TextView tvTitle;
     private ImageButton btnOptions;
+    private ImageButton btnBack;
     private ImageButton btnRotationLock;
     private TextView btnSpeed;
     private ImageButton btnFavorite;
@@ -118,6 +119,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         topBar.setVisibility(View.GONE);
         centerControls.setVisibility(View.GONE);
         controlsOverlay.setVisibility(View.GONE);
+        if (btnBack != null) btnBack.setVisibility(View.GONE);
         controlsVisible = false;
         // 회전 잠금 상태는 컨트롤 숨김과 무관하게 유지
     };
@@ -179,6 +181,8 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         controlsOverlay  = findViewById(R.id.controlsOverlay);
         tvTitle          = findViewById(R.id.tvTitle);
         btnOptions       = findViewById(R.id.btnOptions);
+        btnBack          = findViewById(R.id.btnBack);
+        btnBack.setOnClickListener(v -> getOnBackPressedDispatcher().onBackPressed());
         btnRotationLock  = findViewById(R.id.btnRotationLock);
         btnSpeed         = findViewById(R.id.btnSpeed);
 
@@ -277,6 +281,11 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         options.add("--aout=opensles");
         // SW 디코더 스레드 수: Xvid/DivX 등 HW 가속 불가 코덱 성능 향상
         options.add("--avcodec-threads=4");
+        // 색강화: SDR 영상에 saturation/contrast 미세 강화 — OLED/OLEDoS 명암비 활용. 모든 단말 적용.
+        // 값은 부담 없는 범위. 너무 크면 halo/노이즈 부각 — 사용자 prefs UI(향후) 진입점.
+        options.add("--video-filter=adjust");
+        options.add("--saturation=1.15");
+        options.add("--contrast=1.05");
         source.addVlcOptions(options);
         options.add("--input-fast-seek");
         if (subtitleMargin > 0) options.add("--sub-margin=" + subtitleMargin);
@@ -855,6 +864,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
             topBar.setVisibility(View.GONE);
             centerControls.setVisibility(View.GONE);
             controlsOverlay.setVisibility(View.GONE);
+            if (btnBack != null) btnBack.setVisibility(View.GONE);
             controlsVisible = false;
         } else {
             showControls();
@@ -865,6 +875,7 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         topBar.setVisibility(View.VISIBLE);
         centerControls.setVisibility(View.VISIBLE);
         controlsOverlay.setVisibility(View.VISIBLE);
+        if (btnBack != null) btnBack.setVisibility(View.VISIBLE);
         controlsVisible = true;
         resetHideTimer();
     }

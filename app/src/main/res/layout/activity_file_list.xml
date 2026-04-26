@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/fileListRoot"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
@@ -85,7 +86,7 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:clipToPadding="false"
-            android:paddingBottom="8dp" />
+            android:paddingBottom="80dp" />
 
         <!-- 로컬 빈 화면 -->
         <TextView
@@ -103,7 +104,7 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:clipToPadding="false"
-            android:paddingBottom="8dp"
+            android:paddingBottom="80dp"
             android:visibility="gone" />
 
         <!-- NAS 로딩 스피너 -->
@@ -136,7 +137,7 @@
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:clipToPadding="false"
-            android:paddingBottom="8dp"
+            android:paddingBottom="80dp"
             android:visibility="gone" />
 
         <!-- 즐겨찾기 빈 화면 -->
@@ -177,6 +178,18 @@
                 android:backgroundTint="#4A90D9"
                 android:textColor="#FFFFFF" />
         </LinearLayout>
+
+        <!-- Floating Back 버튼 — 모든 단말 표시. XR 헤드셋의 시스템 back 제스처 보조 + 일반 단말의 명시적 path -->
+        <ImageButton
+            android:id="@+id/btnBack"
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:layout_gravity="bottom|end"
+            android:layout_marginEnd="24dp"
+            android:layout_marginBottom="24dp"
+            android:background="@drawable/bg_red_circle"
+            android:src="@drawable/ic_back"
+            android:contentDescription="뒤로가기" />
 
     </FrameLayout>
 
