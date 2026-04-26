@@ -9,7 +9,7 @@
 
 이 문서는 Galaxy XR 에서 libVLC 기반 SBS 3D 재생을 동작시키기까지 검증된 매니페스트
 선언, API 호출, 실패한 접근, 디버깅 절차를 한곳에 모은 레퍼런스이다.
-시점 기록은 [`xr-sbs-3d-playback.md`](./xr-sbs-3d-playback.md), 코드 위치는
+시점 기록은 [`xr-sbs-3d-playback-2026-04-24.md`](./xr-sbs-3d-playback-2026-04-24.md), 코드 위치는
 `com.example.minseo21.xr` 패키지를 참고.
 
 ---
@@ -572,7 +572,7 @@ javap -public classes/androidx/xr/scenecore/EntityMoveListener.class
 |---|---|
 | Spatial Film APK (`com.hughhou.spatialfilm`) 매니페스트 덤프 | Samsung 전용 property 값 발견 |
 | Spatial Film logcat (재생 시) | DesktopTasksController 의 mXrDesktopMode=2 trigger 흐름 확인 |
-| [`xr-sbs-3d-playback.md`](./xr-sbs-3d-playback.md) | 어제까지 시점 기록 (디버깅 일지) |
+| [`xr-sbs-3d-playback-2026-04-24.md`](./xr-sbs-3d-playback-2026-04-24.md) | 어제까지 시점 기록 (디버깅 일지) |
 | Jetpack XR alpha13 AAR (gradle cache) | 모든 API 시그니처 확인 source-of-truth |
 | [`Minseo21/CLAUDE.md`](../CLAUDE.md) "XR 확장 — 분리 원칙" | 메인/XR 분리 규칙 |
 

@@ -144,9 +144,9 @@ if (editMode && credStore.hasCredentials()) {
 
 ---
 
-## Deferred Issues (TODOS.md)
+## Deferred Issues (todos-2026-04-10.md)
 
-See `TODOS.md` for:
+See `docs/todos-2026-04-10.md` for:
 - P2: Video quality tuning (--android-display-chroma RV16→RV32)
 - P2: NAS subtitle auto-load (srt/smi)
 - P3: Null-guard for currentDbKey in saveCurrentPosition
