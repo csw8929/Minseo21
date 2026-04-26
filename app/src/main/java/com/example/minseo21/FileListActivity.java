@@ -33,6 +33,8 @@ import androidx.recyclerview.widget.DividerItemDecoration;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
+import com.example.minseo21.xr.XrConfig;
+import com.example.minseo21.xr.XrFullSpaceLauncher;
 import com.google.android.material.tabs.TabLayout;
 
 import java.util.ArrayDeque;
@@ -54,6 +56,9 @@ public class FileListActivity extends AppCompatActivity {
     private static final String PREFS_NAME    = "player_prefs";
     private static final String KEY_LAST_STATE = "last_app_state";
     private static boolean hasCheckedResumeThisSession = false;
+
+    // XR 단말 SBS 영상 launch 시 Bundle launch 로 Full Space 진입. 비-XR 단말에선 일반 startActivity.
+    private XrFullSpaceLauncher xrLauncher;
 
     // ── 로컬 ──────────────────────────────────────────────────────────────────
     private FileItemAdapter localAdapter;
@@ -127,6 +132,8 @@ public class FileListActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_file_list);
+
+        xrLauncher = new XrFullSpaceLauncher(this);
 
         // System bar (status / navigation / Samsung taskbar) 영역에 layout 침범 방지.
         // fitsSystemWindows 만으로 일부 단말(특히 Samsung One UI taskbar) 에선 inset 이 안 들어오므로
@@ -744,7 +751,7 @@ public class FileListActivity extends AppCompatActivity {
         intent.setData(uri);
         intent.putExtra("title", title);
         intent.putExtra("useTranscode", useTranscode);
-        startActivity(intent);
+        launchPlayer(intent, title);
     }
 
     /** 파일 목록 뷰 다시 표시 (HLS 로딩 완료/실패 후 호출) */
@@ -1129,7 +1136,20 @@ public class FileListActivity extends AppCompatActivity {
         intent.setAction(Intent.ACTION_VIEW);
         intent.setData(uri);
         intent.putExtra("title", title);
-        startActivity(intent);
+        launchPlayer(intent, title);
+    }
+
+    /**
+     * Galaxy XR 단말에서 파일명 SBS keyword 검출 시 SbsPlayerActivity 로 라우팅 + Bundle launch.
+     * 그 외엔 기존 startActivity 와 동일.
+     */
+    private void launchPlayer(Intent intent, String name) {
+        if (XrConfig.isXrDevice(getPackageManager()) && XrConfig.sbsPatternMatch(name)) {
+            intent.setClass(this, SbsPlayerActivity.class);
+            xrLauncher.startActivity(this, intent);
+        } else {
+            startActivity(intent);
+        }
     }
 
     @Override

@@ -8,6 +8,12 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- Galaxy XR / Android XR — required=false 로 비-XR 단말 영향 0 -->
+    <!-- Galaxy XR(SM-I610)은 type.xr 미지원 → spatial / immersive 로 식별됨 -->
+    <uses-feature android:name="android.hardware.type.xr" android:required="false" />
+    <uses-feature android:name="android.software.xr.api.spatial" android:required="false" />
+    <uses-feature android:name="android.software.xr.immersive" android:required="false" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -18,10 +24,23 @@
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
         android:theme="@style/Theme.Minseo21">
+        <!-- Samsung Galaxy XR 전역 property (Spatial Film 참고). 비-XR 단말 영향 없음. -->
+        <property
+            android:name="android.window.PROPERTY_ACTIVITY_XR_FLAGS"
+            android:value="system_app_integration_supported|turn_screen_on" />
+        <property
+            android:name="android.window.PROPERTY_XR_BOUNDARY_TYPE_RECOMMENDED"
+            android:value="XR_BOUNDARY_TYPE_NO_RECOMMENDATION" />
+
         <!-- 파일 브라우저: 앱 실행 시 첫 화면 -->
         <activity
             android:name=".FileListActivity"
             android:exported="true">
+            <!-- Galaxy XR: FileListActivity 는 Home Space 명시 — SbsPlayerActivity(Full Space) 로
+                 전환 시 SDK 가 spatial mode transition 을 정상 처리하기 위한 prerequisite. -->
+            <property
+                android:name="android.window.PROPERTY_XR_ACTIVITY_START_MODE"
+                android:value="XR_ACTIVITY_START_MODE_Home_Activity" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -213,6 +232,19 @@
             android:name=".NasSetupActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
+
+        <!-- Galaxy XR SBS 3D 전용 플레이어 — MainActivity 상속, Full Space 모드.
+             FileListActivity 가 파일명 SBS keyword 검출 시 XrFullSpaceLauncher 로 launch.
+             Samsung 전용 property 값 사용 (Google 공식 docs 의 FULL_SPACE_MANAGED 는 Galaxy XR 에서 작동 X). -->
+        <activity
+            android:name=".SbsPlayerActivity"
+            android:exported="false"
+            android:resizeableActivity="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode|keyboard|navigation">
+            <property
+                android:name="android.window.PROPERTY_XR_ACTIVITY_START_MODE"
+                android:value="XR_ACTIVITY_START_MODE_Full_Space_Activity" />
+        </activity>
 
     </application>
 

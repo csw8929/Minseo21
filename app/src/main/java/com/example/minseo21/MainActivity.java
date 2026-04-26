@@ -254,6 +254,22 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         }
     }
 
+    // ── 서브클래스 hook (SbsPlayerActivity 등) ─────────────────────────────────
+    // 기본 no-op / false. SbsPlayerActivity 는 SurfaceEntity 양안 렌더링 path 로 override.
+
+    /** VLC options 빌드 마무리 직후 호출. options 리스트에 추가/제거 가능. 기본 no-op. */
+    protected void onConfigureVlcOptions(List<String> options) { }
+
+    /**
+     * mediaPlayer 생성 직후, attachViews() 호출 전에 호출.
+     * @return true 면 호출자(=initPlayer)가 일반 attachViews 를 생략한다 (SurfaceEntity takeover).
+     *         기본 false — 일반 VLCVideoLayout 출력 그대로 사용.
+     */
+    protected boolean attemptStereoTakeover(MediaPlayer mp, String sourceName) { return false; }
+
+    /** 비디오 트랙 정보(videoW/videoH) 확정 직후 호출. 기본 no-op. */
+    protected void onVideoTrackInfo(MediaPlayer mp, int videoW, int videoH) { }
+
     private void initPlayer(VLCVideoLayout videoLayout, Uri videoUri) {
         VideoItem item = null;
         if (PlaylistHolder.playlist != null && PlaylistHolder.currentIndex >= 0
@@ -289,10 +305,19 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         source.addVlcOptions(options);
         options.add("--input-fast-seek");
         if (subtitleMargin > 0) options.add("--sub-margin=" + subtitleMargin);
+        // 서브클래스 hook — 옵션 추가/덮어쓰기 (예: SbsPlayerActivity 의 mediacodec_jni 강제).
+        onConfigureVlcOptions(options);
 
         libVLC = new LibVLC(this, options);
         mediaPlayer = new MediaPlayer(libVLC);
-        mediaPlayer.attachViews(videoLayout, null, false, true);
+
+        // 서브클래스 hook — VLC 출력 takeover 시도. true 면 attachViews 생략 (예: SBS SurfaceEntity).
+        String sourceName = source.syncKey != null ? source.syncKey
+                          : (currentTitle != null ? currentTitle : "");
+        boolean takenOver = attemptStereoTakeover(mediaPlayer, sourceName);
+        if (!takenOver) {
+            mediaPlayer.attachViews(videoLayout, null, false, true);
+        }
         mediaPlayer.getVLCVout().addCallback(this);
         mediaPlayer.setEventListener(event -> runOnUiThread(() -> handleVlcEvent(event)));
 
@@ -552,6 +577,8 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
                         videoH = vt.height;
                         Log.i(TAG, "[VLC] Video Track: " + videoW + "x" + videoH);
                         Log.i(TAG, "[VLC] HW ACCEL: MediaCodec (qti/google) requested.");
+                        // 서브클래스 hook — 비디오 트랙 정보 도착 시 (예: SBS Quad aspect 적용).
+                        onVideoTrackInfo(mediaPlayer, videoW, videoH);
                         break;
                     }
                 }
