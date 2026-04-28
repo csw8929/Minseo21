@@ -283,9 +283,8 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
         // 이전 소스 정리 (HLS 세션, pfd 등)
         if (currentSource != null && currentSource != source) currentSource.onStop();
 
-        // NAS flush 타이머 시작 (중복 제거 후 재등록)
+        // 잔여 nasFlushTask 정리. 시작은 Playing 이벤트에서 (savePositionTask 와 동일 lifecycle)
         handler.removeCallbacks(nasFlushTask);
-        handler.postDelayed(nasFlushTask, NAS_FLUSH_INTERVAL_MS);
 
         ArrayList<String> options = new ArrayList<>();
         // HW 디코더: mediacodec_ndk(NDK) → mediacodec_jni(JNI) → 소프트웨어 순서로 시도
@@ -659,18 +658,22 @@ public class MainActivity extends AppCompatActivity implements IVLCVout.Callback
                 }
                 handler.removeCallbacks(savePositionTask);
                 handler.postDelayed(savePositionTask, SAVE_INTERVAL_MS);
+                handler.removeCallbacks(nasFlushTask);
+                handler.postDelayed(nasFlushTask, NAS_FLUSH_INTERVAL_MS);
                 break;
             case MediaPlayer.Event.Paused:
             case MediaPlayer.Event.Stopped:
                 Log.d(TAG, "[Player] " + (event.type == MediaPlayer.Event.Paused ? "일시정지" : "정지"));
                 btnPlayPause.setImageResource(R.drawable.ic_play);
                 handler.removeCallbacks(savePositionTask);
+                handler.removeCallbacks(nasFlushTask);
                 saveCurrentPosition();
                 showControls();
                 break;
             case MediaPlayer.Event.EndReached:
                 btnPlayPause.setImageResource(R.drawable.ic_play);
                 handler.removeCallbacks(savePositionTask);
+                handler.removeCallbacks(nasFlushTask);
                 if (currentUriKey != null) {
                     final String key = currentUriKey;
                     dbExecutor.execute(() ->

@@ -59,6 +59,19 @@ Minseo21 (app name: "삿치") is an Android video player app built with Java and
 The app UI and code comments are in Korean. Maintain Korean for user-facing strings and comments.
 
 
+## Documentation (필수)
+
+**코드를 수정하거나 동작을 변경했으면 무조건 `docs/` 에 작업 기록을 남긴다.** 예외 없음.
+
+- 위치: 프로젝트 루트의 `docs/` 폴더 (소스 디렉토리 안에 만들지 않는다).
+- 파일명 규칙: `<주제>-YYYY-MM-DD.md` (예: `position-timer-lifecycle-2026-04-28.md`). 같은 날 충돌 시에만 `-HHMM` 추가.
+- 내용: 배경/문제 → 수정 내용 (diff 또는 hunk 단위) → trade-off → 검증 방법.
+- 큰 폭 갱신은 같은 파일을 수정 (날짜 변경 X). 별개 후속 분석이면 새 파일 + 새 날짜.
+- PR 생성 시 관련 docs 변경도 같은 PR 에 포함.
+
+이는 workspace 루트 `D:\workspace\CLAUDE.md` 의 Document 정책을 프로젝트 레벨에 박아둔 것 — 이 프로젝트에서 작업할 때마다 명시적으로 적용.
+
+
 ## XR (Galaxy XR) 확장 — 분리 원칙
 
 **메인 기능은 일반 안드로이드 단말 (libVLC 비디오 플레이어). XR 은 부가 확장.**
