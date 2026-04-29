@@ -79,12 +79,14 @@ The app UI and code comments are in Korean. Maintain Korean for user-facing stri
 
 원칙:
 - **모든 XR 코드는 `com.example.minseo21.xr` 패키지에 모은다.**
-  현재 멤버: `XrConfig.kt` (단말/SBS 검출 + screen pose/shape), `XrFullSpaceLauncher.java` (Bundle launch),
-  `XrSurfaceController.kt` (SurfaceEntity 양안 렌더링 + Movable/Resizable + 비율 적용).
+  현재 멤버: `XrConfig.kt` (단말 검출 + SBS/VR180 키워드 + SpatialMode 별 pose·shape·surface dim helper),
+  `SpatialMode.kt` (NONE / SBS_PANEL / VR180_HEMISPHERE enum, 2026-04-29 도입),
+  `XrFullSpaceLauncher.java` (Bundle launch),
+  `XrSurfaceController.kt` (SurfaceEntity mode 별 양안 렌더링 + Movable/Resizable + 비율 적용).
 - **`MainActivity` 는 매니페스트 무수정 (옵션 B 핵심) — Home Space + system mainPanel decoration 정상.**
   코드 변경은 protected hook 3개 (`onConfigureVlcOptions` / `attemptStereoTakeover` / `onVideoTrackInfo`) 추가 + 호출 지점 삽입만.
   모두 기본 no-op/false 라 비-XR 단말 동작 0 변경.
-- **`FileListActivity` 의 XR 흔적은 `XrFullSpaceLauncher` 필드 한 개 + 라우팅 분기 한 곳 (파일명 SBS keyword 검출 시 `SbsPlayerActivity` 로 launch) 만.**
+- **`FileListActivity` 의 XR 흔적은 `XrFullSpaceLauncher` 필드 한 개 + 라우팅 분기 한 곳 (`XrConfig.detectSpatialMode(filename) != NONE` 시 `SbsPlayerActivity` 로 launch) 만.**
 - **SBS 3D path 는 별 Activity (`SbsPlayerActivity extends MainActivity`) 로 분리한다.**
   - SbsPlayerActivity 매니페스트 entry 만 `XR_ACTIVITY_START_MODE_Full_Space_Activity`. MainActivity 는 무수정.
   - SbsPlayerActivity 가 protected hook override 로 SurfaceEntity takeover 만 처리 — 모든 재생 기능(이어보기/자막/오디오 트랙/스피드/즐겨찾기/Playlist)은 부모 inherit.
