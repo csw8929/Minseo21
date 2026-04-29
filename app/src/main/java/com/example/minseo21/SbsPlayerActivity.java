@@ -2,10 +2,13 @@ package com.example.minseo21;
 
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
+import android.media.MediaMetadataRetriever;
+import android.net.Uri;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.View;
 
+import com.example.minseo21.xr.SpatialMode;
 import com.example.minseo21.xr.XrConfig;
 import com.example.minseo21.xr.XrSurfaceController;
 
@@ -54,28 +57,40 @@ public class SbsPlayerActivity extends MainActivity {
         if (root != null) root.setBackgroundColor(Color.TRANSPARENT);
     }
 
-    /** GL surface(SurfaceEntity) + mediacodec NDK direct render 충돌 → JNI 강제 + DR 비활성. */
+    /**
+     * libVLC codec 설정.
+     *
+     * 2026-04-29 smoke test 결과 — `--no-mediacodec-dr` 가 c2 (modern Android codec stack) 의
+     * configure 를 거부시키는 것 확인 (4K H.264 High@L5.2 입력에서). DR 활성으로 두고
+     * mediacodec_jni → avcodec(SW) 폴백 순서. JNI+DR 은 NDK+DR 와 달리 SurfaceEntity 와 충돌 없음.
+     */
     @Override
     protected void onConfigureVlcOptions(List<String> options) {
         super.onConfigureVlcOptions(options);
         options.removeIf(opt -> opt != null && opt.startsWith("--codec="));
-        options.add("--codec=mediacodec_jni,none");
-        options.add("--no-mediacodec-dr");
+        options.add("--codec=mediacodec_jni,avcodec");
     }
 
     /**
-     * 파일명 SBS keyword 매치 시 SurfaceEntity 로 takeover.
-     * 매치 안 되면 super (=false) 반환 → 호출자가 일반 attachViews 사용.
-     * (이론상 SbsPlayerActivity 는 SBS keyword 영상으로만 launch 되지만 안전망 확보.)
+     * 파일명 기반 SpatialMode 결정 + 영상 frame 크기 사전 probe → SurfaceEntity takeover.
+     *
+     * pre-probe (MediaMetadataRetriever) 로 frame 크기를 미리 알아 SurfaceEntity 의
+     * setSurfacePixelDimensions 가 codec 출력과 정확히 일치하도록 함 — mismatch 시
+     * 영상 작아지고 위치 어긋나는 현상 방지 (smoke test 2026-04-29 확인).
+     *
+     * probe 실패 시 (~5ms 오버헤드, 드물게 실패) mode 별 default 로 fallback.
      */
     @Override
     protected boolean attemptStereoTakeover(MediaPlayer mp, String sourceName) {
         if (xr == null) return super.attemptStereoTakeover(mp, sourceName);
-        if (!XrConfig.sbsPatternMatch(sourceName)) {
-            Log.i(TAG, "SBS pattern 미검출: '" + sourceName + "' → 일반 attachViews fallback");
+        SpatialMode mode = XrConfig.detectSpatialMode(sourceName);
+        if (mode == SpatialMode.NONE) {
+            Log.i(TAG, "SpatialMode=NONE: '" + sourceName + "' → 일반 attachViews fallback");
             return super.attemptStereoTakeover(mp, sourceName);
         }
-        if (!xr.setupStereoSurface(mp)) {
+        int[] dims = probeVideoDimensions();
+        Log.i(TAG, "SpatialMode=" + mode + ": '" + sourceName + "' probe=" + dims[0] + "x" + dims[1]);
+        if (!xr.setupStereoSurface(mp, mode, dims[0], dims[1])) {
             Log.w(TAG, "setupStereoSurface 실패 → 일반 attachViews fallback");
             return super.attemptStereoTakeover(mp, sourceName);
         }
@@ -83,6 +98,26 @@ public class SbsPlayerActivity extends MainActivity {
         View videoLayout = findViewById(R.id.videoLayout);
         if (videoLayout != null) videoLayout.setVisibility(View.GONE);
         return true;
+    }
+
+    /** 현재 Intent 의 URI 로 frame 크기 사전 probe. 실패 / null URI 시 [0, 0] 반환 (fallback). */
+    private int[] probeVideoDimensions() {
+        Uri uri = getIntent() != null ? getIntent().getData() : null;
+        if (uri == null) return new int[] { 0, 0 };
+        MediaMetadataRetriever mmr = new MediaMetadataRetriever();
+        try {
+            mmr.setDataSource(this, uri);
+            String w = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH);
+            String h = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT);
+            int videoW = w != null ? Integer.parseInt(w) : 0;
+            int videoH = h != null ? Integer.parseInt(h) : 0;
+            return new int[] { videoW, videoH };
+        } catch (Exception e) {
+            Log.w(TAG, "MediaMetadataRetriever probe 실패: " + e);
+            return new int[] { 0, 0 };
+        } finally {
+            try { mmr.release(); } catch (Exception ignored) {}
+        }
     }
 
     @Override

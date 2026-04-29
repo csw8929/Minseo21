@@ -1140,11 +1140,12 @@ public class FileListActivity extends AppCompatActivity {
     }
 
     /**
-     * Galaxy XR 단말에서 파일명 SBS keyword 검출 시 SbsPlayerActivity 로 라우팅 + Bundle launch.
-     * 그 외엔 기존 startActivity 와 동일.
+     * Galaxy XR 단말에서 파일명이 SBS / VR180 keyword 매치 시 SbsPlayerActivity 로 라우팅 + Bundle launch.
+     * 그 외엔 기존 startActivity 와 동일. mode 별 분기는 SbsPlayerActivity 안에서 처리.
      */
     private void launchPlayer(Intent intent, String name) {
-        if (XrConfig.isXrDevice(getPackageManager()) && XrConfig.sbsPatternMatch(name)) {
+        if (XrConfig.isXrDevice(getPackageManager())
+                && XrConfig.detectSpatialMode(name) != com.example.minseo21.xr.SpatialMode.NONE) {
             intent.setClass(this, SbsPlayerActivity.class);
             xrLauncher.startActivity(this, intent);
         } else {

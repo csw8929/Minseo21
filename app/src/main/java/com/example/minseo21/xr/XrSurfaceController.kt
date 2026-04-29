@@ -14,18 +14,17 @@ import androidx.xr.scenecore.scene
 import org.videolan.libvlc.MediaPlayer
 
 /**
- * SBS 양안 렌더링 전용 컨트롤러.
+ * SBS / VR180 양안 렌더링 컨트롤러.
  *
  * **결정적 4가지 조합** (메모리 `project_xr_sbs_solution.md` 2026-04-25):
  * 1. Bundle launch (호출자가 [XrFullSpaceLauncher] 로 처리)
  * 2. 매니페스트 `XR_ACTIVITY_START_MODE_Full_Space_Activity` (SbsPlayerActivity 에 부착)
  * 3. `MediaBlendingMode.OPAQUE` 명시 — default(TRANSPARENT)면 비디오 투명 렌더 → 검은 화면
- * 4. `setSurfacePixelDimensions(1920, 1080)` 명시 — 누락 시 frame mismatch
+ * 4. `setSurfacePixelDimensions` 명시 — 누락 시 frame mismatch
  *
- * 이 클래스 책임: 위 4번 + Surface 생성/연결 + Movable/Resizable + 영상 비율 적용.
- *
- * 시네마룸 passthrough fade / mainPanel 작업 / Full↔Home 전환은 의도적으로 빠짐
- * (TODO-XR-2 보류 / SDK 한계 결론 — 2026-04-26 baseline restart 디자인 참조).
+ * 2026-04-29 update — VR180 hemisphere immersion smoke test 통과 후 SpatialMode 분기 도입:
+ * - SBS_PANEL: Quad + Movable/Resizable + applyVideoAspect (기존 동작)
+ * - VR180_HEMISPHERE: Hemisphere + Resizable / aspect 적용 skip (모양 고정)
  *
  * 비-XR 단말에서는 모든 메서드 no-op.
  */
@@ -42,6 +41,7 @@ class XrSurfaceController(private val activity: Activity) {
     private var session: Session? = null
     private var surfaceEntity: SurfaceEntity? = null
     private var currentResizable: ResizableComponent? = null
+    private var currentMode: SpatialMode = SpatialMode.NONE
 
     // ── 초기화 / 해제 ─────────────────────────────────────────────────
 
@@ -64,6 +64,7 @@ class XrSurfaceController(private val activity: Activity) {
         try { surfaceEntity?.dispose() } catch (_: Exception) {}
         surfaceEntity = null
         currentResizable = null
+        currentMode = SpatialMode.NONE
         session = null
     }
 
@@ -73,20 +74,30 @@ class XrSurfaceController(private val activity: Activity) {
      * libVLC 출력을 XR StereoSurface 로 교체.
      * 호출자는 mediaPlayer 생성 직후, attachViews() 호출 전에 실행해야 한다.
      *
+     * @param mode SBS_PANEL = 평면 Quad / VR180_HEMISPHERE = hemisphere immersion. NONE 은 false 반환.
+     * @param videoW / videoH 사전 probe 한 영상 frame 크기 (MediaMetadataRetriever).
+     *                        0 이하면 mode 별 default 적용.
      * @return true = 연결 성공 → 호출자는 attachViews(videoLayout) 를 생략.
-     *         false = 실패 또는 비-XR → 호출자가 기존 attachViews 그대로 사용.
+     *         false = 실패 또는 비-XR 또는 mode=NONE → 호출자가 기존 attachViews 그대로 사용.
      */
-    fun setupStereoSurface(mediaPlayer: MediaPlayer): Boolean {
+    fun setupStereoSurface(
+        mediaPlayer: MediaPlayer,
+        mode: SpatialMode,
+        videoW: Int = 0,
+        videoH: Int = 0,
+    ): Boolean {
+        if (mode == SpatialMode.NONE) return false
         val s = session ?: return false
         return try {
             val vout = mediaPlayer.vlcVout
             if (vout.areViewsAttached()) vout.detachViews()
             surfaceEntity?.dispose()
             currentResizable = null
+            currentMode = mode
             surfaceEntity = SurfaceEntity.create(
                 s,
-                XrConfig.SCREEN_POSE,
-                XrConfig.SCREEN_SHAPE,
+                XrConfig.screenPose(mode),
+                XrConfig.screenShape(mode),
                 SurfaceEntity.StereoMode.SIDE_BY_SIDE,
             )
             // parent 를 activitySpace 로 명시 — 안 하면 default parent 가 mainPanelEntity 라
@@ -104,9 +115,14 @@ class XrSurfaceController(private val activity: Activity) {
             } catch (e: Exception) {
                 Log.w(TAG, "mediaBlendingMode 설정 실패: $e")
             }
-            // Surface 픽셀 크기를 libVLC 출력 frame 과 맞춤. 누락 시 검은 화면.
+            // Surface 픽셀 크기 — codec 출력 frame 과 정확히 일치해야 한다 (smoke test 2026-04-29 검증).
+            // 더 크게 잡으면 codec 가 빈 영역 포함된 surface 에 native frame 만 좌상단에 쓰고
+            // hemisphere/Quad 가 빈 영역까지 매핑 → 영상 작아지고 위치 어긋남.
+            // videoW/H 사전 probe 값 우선, 0 이면 mode 별 default fallback.
+            val pixDim = XrConfig.surfacePixelDim(mode, videoW, videoH)
+            Log.i(TAG, "surfacePixelDim → ${pixDim.width}x${pixDim.height} (probe ${videoW}x${videoH}, mode=$mode)")
             try {
-                surfaceEntity?.setSurfacePixelDimensions(XrConfig.SURFACE_PIXEL_DIM)
+                surfaceEntity?.setSurfacePixelDimensions(pixDim)
             } catch (e: Exception) {
                 Log.w(TAG, "setSurfacePixelDimensions 실패: $e")
             }
@@ -115,13 +131,16 @@ class XrSurfaceController(private val activity: Activity) {
 
             vout.setVideoSurface(xrSurface, null)
             vout.attachViews()
-            Log.i(TAG, "XR StereoSurface 연결 완료")
+            Log.i(TAG, "XR StereoSurface 연결 완료 (mode=$mode)")
 
-            attachInteraction(s)
+            // VR180 hemisphere 는 모양 고정 — Movable/Resizable 안 붙임
+            // (resize callback 이 Shape.Quad 로 덮어써 hemisphere 깨짐).
+            if (mode == SpatialMode.SBS_PANEL) {
+                attachInteraction(s)
+            }
 
             // Full Space 명시 요청 — Bundle launch 가 trigger 이지만 SDK alpha13 가 spatial state
             // 를 fully Full Space 로 전환 안 했을 가능성에 대비한 안전망.
-            // (WIP enterCinemaRoom() 핵심 — 시네마룸 fade 만 제외하고 spatial 안전망은 유지)
             try {
                 s.scene.requestFullSpaceMode()
                 Log.i(TAG, "requestFullSpaceMode() 안전망 호출")
@@ -139,6 +158,7 @@ class XrSurfaceController(private val activity: Activity) {
         } catch (e: Exception) {
             Log.e(TAG, "XR StereoSurface 연결 실패: $e")
             surfaceEntity = null
+            currentMode = SpatialMode.NONE
             false
         }
     }
@@ -149,6 +169,8 @@ class XrSurfaceController(private val activity: Activity) {
      * SurfaceEntity(영상 Quad) 에 Movable + Resizable 부착.
      * 사용자가 헤드셋 컨트롤러로 영상 창을 잡아 옮기고 크기 변경 가능.
      * 비율 잠금은 [applyVideoAspect] 가 실제 영상 비율로 Quad 를 맞춘 다음 활성화한다.
+     *
+     * SBS_PANEL 전용 — VR180_HEMISPHERE 에선 호출하지 않는다.
      */
     private fun attachInteraction(s: Session) {
         val ent = surfaceEntity ?: return
@@ -182,15 +204,15 @@ class XrSurfaceController(private val activity: Activity) {
      * SBS 인코딩 두 가지를 자동 구분:
      * - Full-SBS (예 3840×1080, 프레임 비율 ≥ 3.0): 한 눈 = width/2 × height (= 16:9)
      * - Half-SBS (예 1920×1080 인데 SBS 로 식별, 프레임 비율 < 3.0): 한 눈 = width × height (= 16:9)
-     *   (SBS surface 는 width/2 만 사용하지만 디스플레이가 가로 stretch 해 한 눈 비율은 frame 과 동일)
      *
      * Quad 는 height(default 3.6m) 유지, width 를 새 비율로 늘린다.
      * 호출 후 `isFixedAspectRatioEnabled` 활성화 — 사용자 리사이즈 시 비율 유지.
      *
-     * 비-XR 단말이나 SurfaceEntity 미존재 시 no-op.
+     * VR180_HEMISPHERE / NONE / 비-XR 단말 / SurfaceEntity 미존재 시 no-op.
      */
     fun applyVideoAspect(videoW: Int, videoH: Int, isSbs: Boolean) {
         if (!isXrDevice) return
+        if (currentMode != SpatialMode.SBS_PANEL) return
         if (videoW <= 0 || videoH <= 0) return
         val ent = surfaceEntity ?: return
         val frameAspect = videoW.toFloat() / videoH
