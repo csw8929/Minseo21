@@ -19,3 +19,10 @@ local.properties
 app/src/main/java/com/example/minseo2/DsFileConfig.java
 app/src/main/java/com/example/minseo21/DsFileConfig.java
 .gstack/
+
+# Smoke test 임시 캡처 / 미디어 (절대 commit 금지)
+.scratch/
+*.mp4
+*.mkv
+*.mov
+*.MP4
