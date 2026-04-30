@@ -1,6 +1,10 @@
 package com.example.minseo21.xr
 
+import android.content.Context
 import android.content.pm.PackageManager
+import android.media.MediaMetadataRetriever
+import android.net.Uri
+import android.util.Log
 import androidx.xr.runtime.math.FloatSize2d
 import androidx.xr.runtime.math.IntSize2d
 import androidx.xr.runtime.math.Pose
@@ -79,13 +83,16 @@ object XrConfig {
     }
 
     /**
-     * 파일명 기반 SpatialMode 결정. FileListActivity 라우팅 + SbsPlayerActivity 진입 양쪽에서 사용.
+     * 파일명만으로 SpatialMode 결정 (legacy / fallback path).
      *
      * 우선순위:
      * 1. VR180 keyword (vr180 / [vr] / [180] / _180_ 등) → VR180_HEMISPHERE
      *    — SBS keyword 없어도 매핑됨 (사용자 요청 2026-04-29).
      * 2. SBS keyword (_sbs / _3d / [sbs] 등) → SBS_PANEL
      * 3. 둘 다 없음 → NONE (XR 분기 진입 X, MainActivity 일반 path)
+     *
+     * Uri 가 있으면 [detectSpatialMode] (Context, Uri, String) overload 를 우선 사용 — MP4 sv3d /
+     * st3d 박스 metadata 파싱이 파일명 heuristic 보다 정밀하다. 이 시그니처는 파일명만 알 때 호출.
      */
     @JvmStatic
     fun detectSpatialMode(name: String?): SpatialMode {
@@ -93,6 +100,115 @@ object XrConfig {
         if (vr180PatternMatch(name)) return SpatialMode.VR180_HEMISPHERE
         if (sbsPatternMatch(name)) return SpatialMode.SBS_PANEL
         return SpatialMode.NONE
+    }
+
+    /**
+     * Uri 기반 SpatialMode 결정 — 3-layer 우선순위.
+     *
+     * 1. **MP4 metadata 파싱** ([SpatialMediaParser.parse]) — content:// / file:// 의 moov
+     *    영역에서 sv3d / st3d 마커 검색. sv3d → VR180_HEMISPHERE, st3d → SBS_PANEL.
+     * 2. **파일명 heuristic** ([detectSpatialMode] (String)) — `[vr]` / `_180_` / `_sbs` 등.
+     * 3. **해상도 + 비율 heuristic** ([detectByDimension]) — FHD 이상 + 비율 분석.
+     *    - 2:1 (±5%) → VR180_HEMISPHERE (4K VR180 SBS 의 2048×2048 per eye 형태)
+     *    - 1:1 (±5%) → VR180_HEMISPHERE (mono full-equirect / VR360 근사)
+     *    - 3:1 이상 → SBS_PANEL (Full-SBS 평면 3D)
+     *    - 그 외 (16:9 등) → NONE (일반 영상)
+     *
+     * Layer 3 도입 이유 — 파일명·metadata 가 모두 비어 있는 사용자 콘텐츠도 해상도 형태가
+     * VR 콘텐츠의 그것과 일치하면 자동 매핑 (사용자 요청 2026-04-30). 일반 4K 영화
+     * (3840×2160 = 16:9) 는 NONE 으로 안전하게 회피.
+     *
+     * UI 스레드에서 호출 가능. 로컬 파일 기준 metadata 1MB read + dimension probe 합쳐
+     * 수십~100ms 수준.
+     */
+    @JvmStatic
+    fun detectSpatialMode(context: Context, uri: Uri?, name: String?): SpatialMode {
+        val byMetadata = SpatialMediaParser.parse(context, uri)
+        if (byMetadata != SpatialMode.NONE) {
+            Log.i(
+                "SACH_XR",
+                "detectSpatialMode: metadata 우선 → $byMetadata (uri=$uri name=$name)"
+            )
+            return byMetadata
+        }
+        val byName = detectSpatialMode(name)
+        if (byName != SpatialMode.NONE) {
+            Log.i("SACH_XR", "detectSpatialMode: 파일명 → $byName (name=$name)")
+            return byName
+        }
+        val byDim = detectByDimension(context, uri)
+        if (byDim != SpatialMode.NONE) {
+            Log.i("SACH_XR", "detectSpatialMode: 해상도/비율 → $byDim (name=$name)")
+        }
+        return byDim
+    }
+
+    // ── 해상도/비율 heuristic ─────────────────────────────────────────
+
+    /** dimension heuristic 활성 최소 해상도 (FullHD). 미만은 일반 영상으로 간주. */
+    private const val MIN_VR_PIXEL_WIDTH: Int = 1920
+    private const val MIN_VR_PIXEL_HEIGHT: Int = 1080
+
+    /**
+     * 비율 매칭 허용 오차 — ±0.5%. 정확한 2:1 / 1:1 콘텐츠만 통과.
+     *
+     * VR180 SBS / VR360 콘텐츠는 codec 출력이 표준 정수 해상도 (4096×2048, 5120×2560,
+     * 4096×4096 등) 라 ratio 가 정확히 2.0 / 1.0 으로 떨어진다. 일반 영화는 letterbox
+     * 크롭으로 ratio 가 1.85 / 2.006 / 2.39 등 비정수 — 정확한 2.0 매치는 거의 없다.
+     *
+     * 2026-04-30 — 초기 0.05 (±5%) 는 letterbox 크롭된 4K 영화 (3836×1912 = 2.006) 가
+     * 잘못 매치되어 VR180_HEMISPHERE 로 오분류 → 좁힘.
+     */
+    private const val RATIO_TOLERANCE: Float = 0.005f
+
+    /**
+     * 영상 해상도 + 비율로 SpatialMode 추정 (metadata / 파일명 모두 매칭 안 될 때 fallback).
+     *
+     * - 정확한 2:1 (4096×2048 등) → VR180_HEMISPHERE
+     * - 정확한 1:1 (4096×4096 등) → VR180_HEMISPHERE (VR360 mono 근사)
+     * - 3:1 이상 (3840×1080 등) → SBS_PANEL
+     * - FHD 미만 / 16:9 / 시네마스코프 / 그 외 → NONE
+     *
+     * content:// / file:// scheme 만 처리. http(s) 는 즉시 NONE (NAS 부하 회피).
+     * MediaMetadataRetriever probe ~50ms 수준.
+     */
+    private fun detectByDimension(context: Context, uri: Uri?): SpatialMode {
+        if (uri == null) return SpatialMode.NONE
+        val scheme = uri.scheme?.lowercase()
+        if (scheme != "content" && scheme != "file") return SpatialMode.NONE
+
+        val (w, h) = probeVideoDimensions(context, uri) ?: return SpatialMode.NONE
+        if (w < MIN_VR_PIXEL_WIDTH || h < MIN_VR_PIXEL_HEIGHT) {
+            Log.d("SACH_XR", "detectByDimension: ${w}x${h} 는 FHD 미만 → NONE")
+            return SpatialMode.NONE
+        }
+        val ratio = w.toFloat() / h
+        val mode = when {
+            kotlin.math.abs(ratio - 2.0f) <= RATIO_TOLERANCE -> SpatialMode.VR180_HEMISPHERE
+            kotlin.math.abs(ratio - 1.0f) <= RATIO_TOLERANCE -> SpatialMode.VR180_HEMISPHERE
+            ratio >= 3.0f -> SpatialMode.SBS_PANEL
+            else -> SpatialMode.NONE
+        }
+        Log.d("SACH_XR", "detectByDimension: ${w}x${h} ratio=$ratio → $mode")
+        return mode
+    }
+
+    /** MediaMetadataRetriever 로 video frame width/height probe. 실패 시 null. */
+    private fun probeVideoDimensions(context: Context, uri: Uri): Pair<Int, Int>? {
+        val mmr = MediaMetadataRetriever()
+        return try {
+            mmr.setDataSource(context, uri)
+            val w = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                ?.toIntOrNull() ?: return null
+            val h = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                ?.toIntOrNull() ?: return null
+            if (w <= 0 || h <= 0) null else w to h
+        } catch (e: Exception) {
+            Log.d("SACH_XR", "probeVideoDimensions 실패: $e")
+            null
+        } finally {
+            try { mmr.release() } catch (_: Exception) {}
+        }
     }
 
     // ── SpatialMode 별 SurfaceEntity 파라미터 ────────────────────────

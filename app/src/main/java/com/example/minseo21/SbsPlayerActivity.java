@@ -72,7 +72,11 @@ public class SbsPlayerActivity extends MainActivity {
     }
 
     /**
-     * 파일명 기반 SpatialMode 결정 + 영상 frame 크기 사전 probe → SurfaceEntity takeover.
+     * SpatialMode 결정(MP4 metadata 우선, 파일명 fallback) + 영상 frame 크기 사전 probe →
+     * SurfaceEntity takeover.
+     *
+     * Uri overload {@link XrConfig#detectSpatialMode(android.content.Context, android.net.Uri, String)}
+     * — 파일명에 키워드가 없어도 sv3d / st3d 박스가 있으면 정확히 검출 (2026-04-30 도입).
      *
      * pre-probe (MediaMetadataRetriever) 로 frame 크기를 미리 알아 SurfaceEntity 의
      * setSurfacePixelDimensions 가 codec 출력과 정확히 일치하도록 함 — mismatch 시
@@ -83,7 +87,8 @@ public class SbsPlayerActivity extends MainActivity {
     @Override
     protected boolean attemptStereoTakeover(MediaPlayer mp, String sourceName) {
         if (xr == null) return super.attemptStereoTakeover(mp, sourceName);
-        SpatialMode mode = XrConfig.detectSpatialMode(sourceName);
+        Uri uri = getIntent() != null ? getIntent().getData() : null;
+        SpatialMode mode = XrConfig.detectSpatialMode(this, uri, sourceName);
         if (mode == SpatialMode.NONE) {
             Log.i(TAG, "SpatialMode=NONE: '" + sourceName + "' → 일반 attachViews fallback");
             return super.attemptStereoTakeover(mp, sourceName);
