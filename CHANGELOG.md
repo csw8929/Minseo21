@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.0.2] - 2026-04-30
+
+### Added
+- **VR360 (전방위) 정밀 검출** — `SpatialMode.VR360_SPHERE` 추가. MP4 sv3d 박스 발견 후 그 안의 `equi` 박스 `proj_bounds_top/bottom/left/right` 4 필드를 정밀 파싱 — 모두 0 이면 트림 없는 전방위 → `VR360_SPHERE`, 어느 하나라도 nonzero 면 트림 있는 → `VR180_HEMISPHERE`.
+- **SurfaceEntity.Shape.Sphere(40m) 매핑** — VR360 콘텐츠를 사용자 둘레 360° sphere 안쪽 면에 매핑 (alpha13 SDK 의 Sphere shape 사용).
+- 단위 테스트 3 신규 (`sv3dWithEqui_allZeroBounds` / `vr180Bounds` / `partialBounds`) — 총 29 cases.
+
+### Changed
+- `SpatialMediaParser.classifySphericalMode` 신설 — sv3d 발견 시 equi 박스 정밀 파싱으로 분기. equi 미발견 / bounds 잘림 → 보수적 default `VR180_HEMISPHERE`.
+- `XrConfig.screenPose / screenShape / surfacePixelDim` — `VR360_SPHERE` 분기 추가 (origin pose, Sphere(40m), dynamic surface dim).
+
+### Notes
+- VR360 ↔ VR180 ratio 가 동일하므로 dimension heuristic 만으론 구분 불가. **MP4 sv3d/equi 박스가 박힌 콘텐츠에서만 정확한 분기**. 파일명 / dimension fallback 은 그대로 `VR180_HEMISPHERE` 보수적 default.
+
 ## [0.1.0.1] - 2026-04-30
 
 ### Added

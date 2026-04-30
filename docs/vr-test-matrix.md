@@ -4,8 +4,9 @@
 분류하는지 추적하는 라이브 매트릭스. 새 형식·sample 만날 때마다 줄 추가하고
 실측 결과 기록.
 
-분류기 출력은 3-state — `VR180_HEMISPHERE` / `SBS_PANEL` / `NONE`. 자세한 설계는
-`docs/vr180-metadata-parsing-2026-04-30.md` 참고.
+분류기 출력은 4-state — `VR180_HEMISPHERE` / `VR360_SPHERE` / `SBS_PANEL` / `NONE`.
+자세한 설계는 `docs/vr180-metadata-parsing-2026-04-30.md` (검출 3-layer) +
+`docs/vr360-sphere-detection-2026-04-30.md` (VR360 정밀화) 참고.
 
 ---
 
@@ -17,8 +18,9 @@
 | F-02 | VR180 SBS 5.7K | 5760×2880 | 2.000 | VR180_HEMISPHERE | dimension | Insta360 / Vuze |
 | F-03 | VR180 SBS 8K | 7680×3840 | 2.000 | VR180_HEMISPHERE | dimension | Galaxy XR 디스플레이 매칭 |
 | F-04 | VR180 TaB 정사각 | 4096×4096 | 1.000 | VR180_HEMISPHERE | dimension | 위/아래 분할 |
-| F-05 | VR360 mono full-equi | 4096×2048 | 2.000 | VR180_HEMISPHERE (근사) | dimension | hemisphere 매핑이 부정확 — 앞 절반만 보임. P4 정밀화 후 분리 필요 |
-| F-06 | VR360 SBS | 4096×4096 / 8192×8192 | 1.000 | VR180_HEMISPHERE (근사) | dimension | 위와 동일한 한계 |
+| F-05 | VR360 mono full-equi (metadata 박힘) | 4096×2048 | 2.000 | VR360_SPHERE | metadata (sv3d + equi bounds 모두 0) | 2026-04-30 정밀화 — equi.proj_bounds 모두 0 검출 |
+| F-05b | VR360 mono full-equi (metadata 없음) | 4096×2048 | 2.000 | VR180_HEMISPHERE (근사) | dimension fallback | 보수적 default — VR360 콘텐츠 표준은 metadata 박힘 |
+| F-06 | VR360 SBS (metadata 박힘) | 4096×4096 / 8192×8192 | 1.000 | VR360_SPHERE | metadata | F-05 와 동일한 분기 |
 | F-07 | Full-SBS 3D 영화 4K | 7680×2160 | 3.555 | SBS_PANEL | dimension | |
 | F-08 | Full-SBS 3D 영화 1080p | 3840×1080 | 3.555 | SBS_PANEL | dimension | |
 | F-09 | Half-SBS 3D 영화 1080p | 1920×1040 / 1920×1080 | ~1.78 | SBS_PANEL (파일명 키워드 필요) | 파일명 | dimension 만으론 NONE → 키워드 의존 |
@@ -51,14 +53,17 @@
 
 `app/src/test/java/com/example/minseo21/xr/`:
 
-### `SpatialMediaParserTest.kt` (8 cases)
+### `SpatialMediaParserTest.kt` (11 cases)
 - `emptyInput` / `tooShortInput` → NONE
-- `sv3dInMoov` → VR180_HEMISPHERE
+- `sv3dInMoov` → VR180_HEMISPHERE (equi 미발견 보수적 default)
 - `st3dWithoutSv3d` → SBS_PANEL
 - `sv3dWinsOverSt3d` → VR180 (sv3d 우선)
 - `mdatBeforeSv3d_truncatesSearch` → NONE (non-fast-start MP4 시뮬)
 - `sv3dWithBogusSize_rejected` → NONE (size sanity check 작동)
 - `noSpatialMarker` → NONE
+- `sv3dWithEqui_allZeroBounds` → VR360_SPHERE (2026-04-30 정밀화)
+- `sv3dWithEqui_vr180Bounds` → VR180_HEMISPHERE (left/right=0x40000000)
+- `sv3dWithEqui_partialBounds` → VR180_HEMISPHERE (어느 한 필드 nonzero)
 
 ### `DimensionDetectionTest.kt` (18 cases)
 - VR180 매치: 4096×2048 / 5760×2880 / 7680×3840 / 4096×4096
@@ -97,8 +102,12 @@
 
 ## 알려진 한계 (P4 후속)
 
-- **VR360 ↔ VR180 ratio 동일 (2:1)** — `proj.equi.proj_bounds` 박스 정밀 파싱 필요.
-  현재 둘 다 `VR180_HEMISPHERE` 로 분류되어 VR360 콘텐츠가 hemisphere 안쪽에서
-  앞 절반만 보임.
+- ~~VR360 ↔ VR180 ratio 동일~~ — **2026-04-30 v0.1.0.2 처리 완료.** sv3d 발견 후
+  `equi.proj_bounds` 정밀 파싱으로 분기 (`docs/vr360-sphere-detection-2026-04-30.md`).
+  metadata 박힌 콘텐츠에서 정확. 파일명 / dimension fallback 은 보수적으로
+  VR180_HEMISPHERE 유지.
 - **Half-SBS / MV-HEVC** — ratio 만으론 일반 영상과 구분 불가. 파일명 / metadata
-  의존. MV-HEVC 는 별도 트랙 구조라 추가 파서 필요.
+  의존. MV-HEVC 는 별도 트랙 구조라 추가 파서 필요. (사용자 요청 시 진행.)
+- **VR360 SBS / TaB stereo 모드 정밀화** — `st3d.stereo_mode` 값 (1=top-bottom /
+  2=SBS) 해석. 현재 `StereoMode.SIDE_BY_SIDE` 강제이므로 mono-360 도 SBS 매핑되지만
+  좌/우 같은 영상이라 무해.
