@@ -133,8 +133,8 @@ class XrSurfaceController(private val activity: Activity) {
             vout.attachViews()
             Log.i(TAG, "XR StereoSurface 연결 완료 (mode=$mode)")
 
-            // VR180 hemisphere 는 모양 고정 — Movable/Resizable 안 붙임
-            // (resize callback 이 Shape.Quad 로 덮어써 hemisphere 깨짐).
+            // VR180 hemisphere / VR360 sphere 는 모양 고정 — Movable/Resizable 안 붙임
+            // (resize callback 이 Shape.Quad 로 덮어써 hemisphere/sphere 깨짐).
             if (mode == SpatialMode.SBS_PANEL) {
                 attachInteraction(s)
             }
@@ -208,7 +208,7 @@ class XrSurfaceController(private val activity: Activity) {
      * Quad 는 height(default 3.6m) 유지, width 를 새 비율로 늘린다.
      * 호출 후 `isFixedAspectRatioEnabled` 활성화 — 사용자 리사이즈 시 비율 유지.
      *
-     * VR180_HEMISPHERE / NONE / 비-XR 단말 / SurfaceEntity 미존재 시 no-op.
+     * VR180_HEMISPHERE / VR360_SPHERE / NONE / 비-XR 단말 / SurfaceEntity 미존재 시 no-op.
      */
     fun applyVideoAspect(videoW: Int, videoH: Int, isSbs: Boolean) {
         if (!isXrDevice) return

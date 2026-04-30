@@ -235,15 +235,23 @@ object XrConfig {
     private val VR180_SHAPE: SurfaceEntity.Shape = SurfaceEntity.Shape.Hemisphere(40.0f)
     private val VR180_SURFACE_DIM: IntSize2d = IntSize2d(4096, 2048)
 
+    // VR360 은 origin pose / Sphere(40m) — VR180 hemisphere 와 같은 거리감으로 통일.
+    // VR360 의 표준 frame 은 mono 4K 4096×2048 / SBS 4K 4096×4096 — codec 출력에 동적 매칭.
+    private val VR360_POSE: Pose = VR180_POSE
+    private val VR360_SHAPE: SurfaceEntity.Shape = SurfaceEntity.Shape.Sphere(40.0f)
+    private val VR360_SURFACE_DIM: IntSize2d = IntSize2d(4096, 2048)
+
     @JvmStatic
     fun screenPose(mode: SpatialMode): Pose = when (mode) {
         SpatialMode.VR180_HEMISPHERE -> VR180_POSE
+        SpatialMode.VR360_SPHERE -> VR360_POSE
         SpatialMode.SBS_PANEL, SpatialMode.NONE -> SBS_PANEL_POSE
     }
 
     @JvmStatic
     fun screenShape(mode: SpatialMode): SurfaceEntity.Shape = when (mode) {
         SpatialMode.VR180_HEMISPHERE -> VR180_SHAPE
+        SpatialMode.VR360_SPHERE -> VR360_SHAPE
         SpatialMode.SBS_PANEL, SpatialMode.NONE -> SBS_PANEL_SHAPE
     }
 
@@ -258,6 +266,7 @@ object XrConfig {
         if (videoW > 0 && videoH > 0) return IntSize2d(videoW, videoH)
         return when (mode) {
             SpatialMode.VR180_HEMISPHERE -> VR180_SURFACE_DIM
+            SpatialMode.VR360_SPHERE -> VR360_SURFACE_DIM
             SpatialMode.SBS_PANEL, SpatialMode.NONE -> SBS_PANEL_SURFACE_DIM
         }
     }

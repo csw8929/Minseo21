@@ -23,6 +23,22 @@ class SpatialMediaParserTest {
         return buf.array()
     }
 
+    /**
+     * 완전한 equi 박스 (28 bytes) — version+flags 포함, bounds 4 필드 직접 지정.
+     * VR360 표준: 모두 0. VR180 표준: top=0, bottom=0, left=0x40000000, right=0x40000000.
+     */
+    private fun equiBox(top: Int, bottom: Int, left: Int, right: Int): ByteArray {
+        val buf = ByteBuffer.allocate(28).order(ByteOrder.BIG_ENDIAN)
+        buf.putInt(28)
+        buf.put("equi".toByteArray(Charsets.US_ASCII))
+        buf.putInt(0)  // version (1 byte) + flags (3 bytes) — 모두 0
+        buf.putInt(top)
+        buf.putInt(bottom)
+        buf.putInt(left)
+        buf.putInt(right)
+        return buf.array()
+    }
+
     /** parser 가 NONE 반환을 인정하는 너무 짧은 input. */
     @Test
     fun emptyInput_returnsNone() {
@@ -115,6 +131,52 @@ class SpatialMediaParserTest {
         val input = ftyp + moov
         val result = SpatialMediaParser.parseStream(ByteArrayInputStream(input))
         assertEquals(SpatialMode.NONE, result)
+    }
+
+    // ── VR360 vs VR180 분기 (equi.proj_bounds 정밀 파싱) ─────────────────
+
+    /** sv3d + equi (bounds 모두 0) → VR360_SPHERE (트림 없는 전방위). */
+    @Test
+    fun sv3dWithEqui_allZeroBounds_returnsVr360Sphere() {
+        val ftyp = boxHeader("ftyp", 32) + ByteArray(24)
+        // sv3d 박스 안에 equi 박스를 넣음 — moov 안에서 byte-grep 으로 찾는 구조라
+        // 정확한 트리 nesting 대신 평면 배치로 충분 (parser 가 byte-grep 만 함).
+        val moovPayload = ByteArray(20) +
+                boxHeader("sv3d", 8) +     // sv3d 마커 (size sanity check 통과용)
+                equiBox(0, 0, 0, 0)        // equi bounds 모두 0 → VR360
+        val moov = boxHeader("moov", 8 + moovPayload.size) + moovPayload
+
+        val input = ftyp + moov
+        val result = SpatialMediaParser.parseStream(ByteArrayInputStream(input))
+        assertEquals(SpatialMode.VR360_SPHERE, result)
+    }
+
+    /** sv3d + equi (left/right nonzero, VR180 표준 0x40000000) → VR180_HEMISPHERE. */
+    @Test
+    fun sv3dWithEqui_vr180Bounds_returnsVr180Hemisphere() {
+        val ftyp = boxHeader("ftyp", 32) + ByteArray(24)
+        val moovPayload = ByteArray(20) +
+                boxHeader("sv3d", 8) +
+                equiBox(0, 0, 0x40000000, 0x40000000)  // VR180 표준 bounds
+        val moov = boxHeader("moov", 8 + moovPayload.size) + moovPayload
+
+        val input = ftyp + moov
+        val result = SpatialMediaParser.parseStream(ByteArrayInputStream(input))
+        assertEquals(SpatialMode.VR180_HEMISPHERE, result)
+    }
+
+    /** sv3d + equi (어느 한 필드만 nonzero) → VR180_HEMISPHERE (트림 있음 처리). */
+    @Test
+    fun sv3dWithEqui_partialBounds_returnsVr180Hemisphere() {
+        val ftyp = boxHeader("ftyp", 32) + ByteArray(24)
+        val moovPayload = ByteArray(20) +
+                boxHeader("sv3d", 8) +
+                equiBox(0, 0x10000000, 0, 0)
+        val moov = boxHeader("moov", 8 + moovPayload.size) + moovPayload
+
+        val input = ftyp + moov
+        val result = SpatialMediaParser.parseStream(ByteArrayInputStream(input))
+        assertEquals(SpatialMode.VR180_HEMISPHERE, result)
     }
 
     /** 마커 자체가 없으면 NONE. */
