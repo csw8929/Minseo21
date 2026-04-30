@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.0.1] - 2026-04-30
+
+### Added
+- **MP4 sv3d / st3d 박스 메타데이터 파싱** — `xr/SpatialMediaParser.kt`. moov 영역에서 sv3d / st3d 4-byte 마커를 byte-grep + mdat 경계 + size sanity check 로 검색해 SpatialMode 추정. 파일명에 키워드 없는 콘텐츠도 metadata 가 박혀 있으면 정확한 모드로 검출.
+- **해상도/비율 휴리스틱** — metadata · 파일명 모두 매칭 안 되면 영상 frame ratio 기반 fallback. 정확 2:1 / 1:1 (±0.5%) → VR180_HEMISPHERE, ≥ 3:1 → SBS_PANEL, FHD 미만 / 16:9 / 시네마스코프 → NONE. 일반 4K 영화 (3836×1912 = ratio 2.006 등 letterbox 변형) 도 정확히 일반 path 로 라우팅.
+- `docs/vr180-metadata-parsing-2026-04-30.md` — TODO-VR180-3 (P3) 처리 + 사용자 요청 dimension heuristic 통합 기록.
+
+### Changed
+- `XrConfig.detectSpatialMode` — Uri overload 추가, 3-layer 우선순위 (metadata → 파일명 → 해상도/비율). 기존 `detectSpatialMode(name)` 시그니처는 유지.
+- `FileListActivity.launchPlayer` / `SbsPlayerActivity.attemptStereoTakeover` — 새 Uri overload 호출로 변경. 회귀 0 (기존 키워드 콘텐츠 동작 그대로).
+
 ## [0.1.0.0] - 2026-04-29
 
 ### Added

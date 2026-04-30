@@ -1140,12 +1140,18 @@ public class FileListActivity extends AppCompatActivity {
     }
 
     /**
-     * Galaxy XR 단말에서 파일명이 SBS / VR180 keyword 매치 시 SbsPlayerActivity 로 라우팅 + Bundle launch.
+     * Galaxy XR 단말에서 SpatialMode 검출 시 SbsPlayerActivity 로 라우팅 + Bundle launch.
+     *
+     * Uri overload {@link XrConfig#detectSpatialMode(android.content.Context, android.net.Uri, String)}
+     * 사용 — MP4 sv3d / st3d 박스 metadata 우선, 파일명 heuristic fallback. NAS HTTP scheme 은
+     * parser 가 즉시 NONE 반환해 파일명 heuristic 으로 자연 fallback.
+     *
      * 그 외엔 기존 startActivity 와 동일. mode 별 분기는 SbsPlayerActivity 안에서 처리.
      */
     private void launchPlayer(Intent intent, String name) {
         if (XrConfig.isXrDevice(getPackageManager())
-                && XrConfig.detectSpatialMode(name) != com.example.minseo21.xr.SpatialMode.NONE) {
+                && XrConfig.detectSpatialMode(this, intent.getData(), name)
+                        != com.example.minseo21.xr.SpatialMode.NONE) {
             intent.setClass(this, SbsPlayerActivity.class);
             xrLauncher.startActivity(this, intent);
         } else {
