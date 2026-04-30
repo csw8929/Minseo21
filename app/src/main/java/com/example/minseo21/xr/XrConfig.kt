@@ -164,13 +164,8 @@ object XrConfig {
     /**
      * 영상 해상도 + 비율로 SpatialMode 추정 (metadata / 파일명 모두 매칭 안 될 때 fallback).
      *
-     * - 정확한 2:1 (4096×2048 등) → VR180_HEMISPHERE
-     * - 정확한 1:1 (4096×4096 등) → VR180_HEMISPHERE (VR360 mono 근사)
-     * - 3:1 이상 (3840×1080 등) → SBS_PANEL
-     * - FHD 미만 / 16:9 / 시네마스코프 / 그 외 → NONE
-     *
      * content:// / file:// scheme 만 처리. http(s) 는 즉시 NONE (NAS 부하 회피).
-     * MediaMetadataRetriever probe ~50ms 수준.
+     * MediaMetadataRetriever probe ~50ms 수준. 분류 자체는 [detectByRatio] 가 담당.
      */
     private fun detectByDimension(context: Context, uri: Uri?): SpatialMode {
         if (uri == null) return SpatialMode.NONE
@@ -178,19 +173,29 @@ object XrConfig {
         if (scheme != "content" && scheme != "file") return SpatialMode.NONE
 
         val (w, h) = probeVideoDimensions(context, uri) ?: return SpatialMode.NONE
-        if (w < MIN_VR_PIXEL_WIDTH || h < MIN_VR_PIXEL_HEIGHT) {
-            Log.d("SACH_XR", "detectByDimension: ${w}x${h} 는 FHD 미만 → NONE")
-            return SpatialMode.NONE
-        }
-        val ratio = w.toFloat() / h
-        val mode = when {
+        val mode = detectByRatio(w, h)
+        Log.d("SACH_XR", "detectByDimension: ${w}x${h} → $mode")
+        return mode
+    }
+
+    /**
+     * 영상 frame 의 해상도/비율로 SpatialMode 추정 — pure function (단위 테스트 대상).
+     *
+     * - 정확한 2:1 (4096×2048 등, ±0.5%) → VR180_HEMISPHERE
+     * - 정확한 1:1 (4096×4096 등, ±0.5%) → VR180_HEMISPHERE (VR360 mono 근사)
+     * - 3:1 이상 (3840×1080 등) → SBS_PANEL
+     * - FHD 미만 / 16:9 / 시네마스코프 / 그 외 → NONE
+     */
+    @JvmStatic
+    fun detectByRatio(videoW: Int, videoH: Int): SpatialMode {
+        if (videoW < MIN_VR_PIXEL_WIDTH || videoH < MIN_VR_PIXEL_HEIGHT) return SpatialMode.NONE
+        val ratio = videoW.toFloat() / videoH
+        return when {
             kotlin.math.abs(ratio - 2.0f) <= RATIO_TOLERANCE -> SpatialMode.VR180_HEMISPHERE
             kotlin.math.abs(ratio - 1.0f) <= RATIO_TOLERANCE -> SpatialMode.VR180_HEMISPHERE
             ratio >= 3.0f -> SpatialMode.SBS_PANEL
             else -> SpatialMode.NONE
         }
-        Log.d("SACH_XR", "detectByDimension: ${w}x${h} ratio=$ratio → $mode")
-        return mode
     }
 
     /** MediaMetadataRetriever 로 video frame width/height probe. 실패 시 null. */
