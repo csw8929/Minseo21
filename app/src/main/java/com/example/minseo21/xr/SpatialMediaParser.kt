@@ -3,6 +3,7 @@ package com.example.minseo21.xr
 import android.content.Context
 import android.net.Uri
 import android.util.Log
+import androidx.annotation.VisibleForTesting
 import java.io.InputStream
 
 /**
@@ -67,7 +68,8 @@ object SpatialMediaParser {
         }
     }
 
-    private fun parseStream(input: InputStream): SpatialMode {
+    @VisibleForTesting
+    internal fun parseStream(input: InputStream): SpatialMode {
         val buf = ByteArray(MAX_READ_BYTES)
         var total = 0
         while (total < MAX_READ_BYTES) {

@@ -44,6 +44,13 @@ android {
     kotlinOptions {
         jvmTarget = "11"
     }
+
+    testOptions {
+        // android.util.Log 등 Android SDK stub 호출 시 RuntimeException 대신 default value
+        // 반환 — JVM unit test 에서 SpatialMediaParser / XrConfig 같은 pure-ish helper 를
+        // mock 없이 직접 검증할 수 있게 한다.
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
